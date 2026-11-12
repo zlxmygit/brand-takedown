@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — safety reconstruction (2026-11-12)
+## 2.0.0 — 2026-11-12
+
+Safety reconstruction release. This major version replaces the unsafe 1.x workflow; see README for installation and migration.
 
 Breaking: Python 3.11+, case schema v2, brand-bound case paths, approval-bound EML CLI, explicit receipt
 recording for SUBMITTED. No in-place legacy case migration. Old evidence is never silently resealed.
