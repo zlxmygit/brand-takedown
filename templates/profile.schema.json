@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BrandProtectionProfile",
+  "description": "Brand-agnostic intellectual property, target market, product safety, and allowlist configuration for brand-takedown skill.",
+  "type": "object",
+  "required": [
+    "brand_slug",
+    "brand_name",
+    "legal_entity_name_en",
+    "entity_address",
+    "authorized_signatory",
+    "official_domains",
+    "target_markets"
+  ],
+  "properties": {
+    "brand_slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Lowercase hyphenated identifier for the brand (e.g. 'acme', 'globex-mobility')."
+    },
+    "brand_name": {
+      "type": "string",
+      "description": "Human-readable commercial brand name."
+    },
+    "legal_entity_name_en": {
+      "type": "string",
+      "description": "Full English legal entity name of the IP owner or exclusive licensee."
+    },
+    "legal_entity_name_local": {
+      "type": "string",
+      "description": "Original local-language legal entity name if registered outside English jurisdictions."
+    },
+    "entity_address": {
+      "type": "string",
+      "description": "Registered physical mailing address required by DMCA 17 U.S.C. 512(c)(3) and EU DSA Art. 16."
+    },
+    "authorized_signatory": {
+      "type": "object",
+      "required": ["name", "title", "legal_email"],
+      "properties": {
+        "name": { "type": "string" },
+        "title": { "type": "string" },
+        "legal_email": { "type": "string" },
+        "phone": { "type": "string" }
+      }
+    },
+    "official_domains": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Primary official brand domains (automatically merged into allowlist_domains)."
+    },
+    "allowlist_domains": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "All official domains, regional subdomains, CDN domains, and authorized dealer domains exempt from takedown."
+    },
+    "official_product_urls": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Canonical authentic product catalog URLs on the official website (falls back to https://<primary_official_domain>/)."
+    },
+    "counterfeit_warning_url": {
+      "type": "string",
+      "description": "Public URL on the official website warning consumers about counterfeit/unauthorized domains."
+    },
+    "target_markets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["US", "CA", "EU", "UK", "AU", "CN_EXPORT", "GLOBAL"]
+      }
+    },
+    "product_risk_profile": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "high_power_lithium_mobility",
+            "electronics_battery",
+            "children_or_medical",
+            "automotive_parts",
+            "general_consumer_goods"
+          ]
+        },
+        "safety_standards": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "hazard_statement_en": {
+          "type": "string"
+        }
+      }
+    },
+    "trademarks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["jurisdiction", "mark_text", "reg_number", "status"],
+        "properties": {
+          "jurisdiction": { "type": "string" },
+          "mark_text": { "type": "string" },
+          "reg_number": { "type": "string" },
+          "status": { "type": "string", "enum": ["registered", "pending", "common_law"] },
+          "nice_classes": { "type": "array", "items": { "type": "integer" } },
+          "expiry_date": { "type": "string" },
+          "cert_file_path": { "type": "string" }
+        }
+      }
+    },
+    "patents_and_designs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["jurisdiction", "type", "reg_number"],
+        "properties": {
+          "jurisdiction": { "type": "string" },
+          "type": { "type": "string", "enum": ["design", "utility"] },
+          "reg_number": { "type": "string" },
+          "product_model": { "type": "string" },
+          "expiry_date": { "type": "string" },
+          "cert_file_path": { "type": "string" },
+          "drawings_file_path": { "type": "string" }
+        }
+      }
+    },
+    "copyright_originals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["asset_name", "official_source_url"],
+        "properties": {
+          "asset_name": { "type": "string" },
+          "official_source_url": { "type": "string" },
+          "first_published_date": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "keyword_watch_patterns": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Lowercase brand/model keywords monitored via crt.sh CT logs and liveness checks."
+    }
+  }
+}

@@ -1,0 +1,28 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Strictly exclude private brand profiles, certificates, case records & generated notices
+brand-protection/
+cases/
+certificates/
+packets/
+evidence/
+profile.json
+registry.json
+radar_seen.json
+evidence-manifest.json
+recon-report.json
+*.eml
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.har
+*.tmp
