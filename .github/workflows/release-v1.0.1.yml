@@ -1,0 +1,161 @@
+name: Correct release version to v1.0.1
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-v1.0.1.yml
+      - docs/releases/v1.0.1.md
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-number-correction-443073786
+  cancel-in-progress: false
+env:
+  RELEASE_TAG: v1.0.1
+  RELEASE_ID: '443073786'
+  OLD_TAG: v2.0.0
+  OLD_SHA: 94a7c29313174de6806d03ec734fec95eeb1bfd3
+  PACKAGE_SHA256: 83cdac1f4c8e35dbd30e5b7d9f3a1c584639b1d66393756b103365186e0321da
+jobs:
+  verify:
+    if: github.repository == 'zlxmygit/brand-takedown' && github.ref == 'refs/heads/main'
+    name: Verify numbering-only change (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Verify unchanged runtime, manifest, tests, and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code "$OLD_SHA" HEAD -- scripts tests templates references README.md SKILL.md SECURITY.md docs/audit-remediation.md
+          python -c 'import hashlib,json,pathlib; d=json.loads(pathlib.Path("docs/source-checksums.json").read_text()); assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()==h for p,h in d["files"].items())'
+          if git ls-files | grep -Ei '(^|/)(cases|certificates|evidence|packets)/|(^|/)(profile|registry|case|radar_seen|evidence-manifest|recon-report)\.json$|\.(eml|pdf|png|jpe?g|har|pem|key)$|(^|/)\.env($|\.)'; then
+            exit 1
+          fi
+          python -m compileall -q scripts tests
+          python -m unittest discover -s tests -v
+          python scripts/package_skill.py --out "$RUNNER_TEMP/first.zip"
+          python scripts/package_skill.py --out "$RUNNER_TEMP/second.zip"
+          cmp "$RUNNER_TEMP/first.zip" "$RUNNER_TEMP/second.zip"
+          python -c 'import hashlib,os,pathlib; assert hashlib.sha256((pathlib.Path(os.environ["RUNNER_TEMP"])/"first.zip").read_bytes()).hexdigest()==os.environ["PACKAGE_SHA256"]'
+          python -m zipfile -e "$RUNNER_TEMP/first.zip" "$RUNNER_TEMP/extracted"
+          cd "$RUNNER_TEMP/extracted/brand-takedown"
+          python -c 'import hashlib,pathlib; rows=pathlib.Path("SHA256SUMS.txt").read_text().splitlines(); assert len(rows)==40; assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()==h for h,p in (row.split("  ",1) for row in rows))'
+          python -m unittest discover -s tests -v
+  correct-release:
+    needs: verify
+    if: github.repository == 'zlxmygit/brand-takedown' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Build corrected version assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ASSET_DIR="$RUNNER_TEMP/release-assets"
+          mkdir -p "$ASSET_DIR"
+          python scripts/package_skill.py --out "$ASSET_DIR/brand-takedown-v1.0.1.zip"
+          cp docs/releases/v1.0.1.md "$ASSET_DIR/RELEASE-NOTES.zh-CN.md"
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+          folder = pathlib.Path(os.environ['ASSET_DIR'])
+          package = folder / 'brand-takedown-v1.0.1.zip'
+          digest = hashlib.sha256(package.read_bytes()).hexdigest()
+          assert digest == os.environ['PACKAGE_SHA256']
+          data = {
+              'version': os.environ['RELEASE_TAG'],
+              'source_commit': os.environ['GITHUB_SHA'],
+              'version_only_correction_from': os.environ['OLD_TAG'],
+              'unchanged_runtime_commit': os.environ['OLD_SHA'],
+              'workflow_url': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+              'verification': {'distinct_tests': 150, 'source_suite': 'passed', 'extracted_package_suite': 'passed',
+                               'matrix': ['ubuntu-24.04/python3.11', 'ubuntu-24.04/python3.13', 'macos-15/python3.11', 'macos-15/python3.13'],
+                               'runtime_unchanged': True, 'source_manifest': 'passed', 'private_artifact_guard': 'passed', 'reproducible_build': 'passed'},
+              'package': {'filename': package.name, 'sha256': digest, 'size_bytes': package.stat().st_size},
+              'scope': 'Version correction only; existing compatibility and human-review requirements remain.'
+          }
+          (folder / 'VALIDATION.json').write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          PY
+          cd "$ASSET_DIR"
+          sha256sum brand-takedown-v1.0.1.zip RELEASE-NOTES.zh-CN.md VALIDATION.json > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+      - name: Correct existing release, verify assets, then remove mistaken tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: zlxmygit/brand-takedown
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+          ORIGINAL_V1=$(gh api "repos/$GH_REPO/git/ref/tags/v1.0.0" --jq '.object.sha')
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" > "$RUNNER_TEMP/release-before.json"
+          CURRENT_TAG=$(python - <<'PY'
+          import json, os, pathlib
+          r = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'release-before.json').read_text())
+          assert r['id'] == int(os.environ['RELEASE_ID']) and not r.get('immutable', False)
+          assert r['tag_name'] in (os.environ['OLD_TAG'], os.environ['RELEASE_TAG'])
+          assert r['target_commitish'] in (os.environ['OLD_SHA'], os.environ['GITHUB_SHA'])
+          assert {a['name'] for a in r['assets']} <= {'brand-takedown-v2.0.0.zip', 'brand-takedown-v1.0.1.zip', 'SHA256SUMS.txt', 'VALIDATION.json', 'RELEASE-NOTES.zh-CN.md'}
+          print(r['tag_name'])
+          PY
+          )
+          OTHER_ID=$(gh api "repos/$GH_REPO/releases?per_page=100" --jq '.[] | select(.tag_name=="v1.0.1") | .id')
+          test -z "$OTHER_ID" || test "$OTHER_ID" = "$RELEASE_ID"
+          NEW_REF=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$RELEASE_TAG" --jq '.[] | select(.ref=="refs/tags/v1.0.1") | .object.sha')
+          if [ -z "$NEW_REF" ]; then
+            gh api --method POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$RELEASE_TAG" -f sha="$GITHUB_SHA" > /dev/null
+          else
+            test "$NEW_REF" = "$GITHUB_SHA"
+          fi
+          gh release edit "$CURRENT_TAG" --tag "$RELEASE_TAG" --verify-tag --target "$GITHUB_SHA" --draft=true --latest=false \
+            --title 'v1.0.1 — 安全修复版 / Reviewed Brand Takedown Skill' --notes-file docs/releases/v1.0.1.md
+          test "$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '.tag_name')" = "$RELEASE_TAG"
+          ASSET_DIR="$RUNNER_TEMP/release-assets"
+          gh release upload "$RELEASE_TAG" "$ASSET_DIR/brand-takedown-v1.0.1.zip" "$ASSET_DIR/SHA256SUMS.txt" "$ASSET_DIR/VALIDATION.json" "$ASSET_DIR/RELEASE-NOTES.zh-CN.md" --clobber
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/draft-readback"
+          (cd "$RUNNER_TEMP/draft-readback" && sha256sum -c SHA256SUMS.txt)
+          for asset in brand-takedown-v1.0.1.zip SHA256SUMS.txt VALIDATION.json RELEASE-NOTES.zh-CN.md; do
+            cmp "$ASSET_DIR/$asset" "$RUNNER_TEMP/draft-readback/$asset"
+          done
+          if gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets" --jq '.[].name' | grep -Fxq 'brand-takedown-v2.0.0.zip'; then
+            gh release delete-asset "$RELEASE_TAG" brand-takedown-v2.0.0.zip --yes
+          fi
+          test "$(gh api "repos/$GH_REPO/releases/$RELEASE_ID/assets" --jq 'length')" = '4'
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+          test "$(gh api "repos/$GH_REPO/releases/latest" --jq '.id')" = "$RELEASE_ID"
+          test "$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')" = "$RELEASE_TAG"
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$GITHUB_SHA"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/published-readback"
+          (cd "$RUNNER_TEMP/published-readback" && sha256sum -c SHA256SUMS.txt)
+          for asset in brand-takedown-v1.0.1.zip SHA256SUMS.txt VALIDATION.json RELEASE-NOTES.zh-CN.md; do
+            cmp "$ASSET_DIR/$asset" "$RUNNER_TEMP/published-readback/$asset"
+          done
+          OLD_REF=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$OLD_TAG" --jq '.[] | select(.ref=="refs/tags/v2.0.0") | .object.sha')
+          if [ -n "$OLD_REF" ]; then
+            test "$OLD_REF" = "$OLD_SHA"
+            gh api --method DELETE "repos/$GH_REPO/git/refs/tags/$OLD_TAG"
+          fi
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/v1.0.0" --jq '.object.sha')" = "$ORIGINAL_V1"
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '{tag_name,draft,prerelease,html_url,assets:[.assets[]|{name,size,state,digest}]}'
+          printf 'Corrected to v1.0.1; runtime unchanged, four assets verified, mistaken v2.0.0 tag removed.\n' >> "$GITHUB_STEP_SUMMARY"
