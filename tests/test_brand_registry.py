@@ -1,146 +1,87 @@
-from __future__ import annotations
-
+import copy
 import json
-import sys
-import tempfile
-import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from brand_registry import (  # noqa: E402
-    is_allowlisted_url,
-    load_brand_profile,
-    normalize_hostname,
-    register_brand,
-    sanitize_http_url,
-    validate_profile,
-)
+from common import Fixture, ROOT, br
+from storage import ConflictError
 
 
-class TestBrandRegistry(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp_dir.name)
-        self.registry_path = self.base / "registry.json"
-        self.brand_data_dir = self.base / "brands" / "acme"
+class TestBrandRegistry(Fixture):
+    def test_valid_sample(self):
+        self.assertEqual(br.validate_profile(self.profile), [])
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    def test_null_required_identity(self):
+        for key in ("brand_name", "legal_entity_name_en", "entity_address"):
+            with self.subTest(key=key):
+                p = copy.deepcopy(self.profile); p[key] = None
+                self.assertTrue(br.validate_profile(p))
 
-    def _valid_sample_profile(self) -> dict:
-        return {
-            "brand_slug": "acme",
-            "brand_name": "Acme Mobility",
-            "legal_entity_name_en": "Acme Mobility Innovation Co., Ltd.",
-            "legal_entity_name_local": "艾克米创新科技有限公司",
-            "entity_address": "100 Innovation Way, Suite 200, Austin, TX 78701, USA",
-            "authorized_signatory": {
-                "name": "Legal Counsel",
-                "title": "IP Enforcement Lead",
-                "legal_email": "legal@acmesport.com",
-                "phone": "+1-512-555-0199",
-            },
-            "official_domains": ["acmesport.com"],
-            "allowlist_domains": ["authorized-dealer.eu"],
-            "official_product_urls": ["https://acmesport.com/products/x1"],
-            "counterfeit_warning_url": "https://acmesport.com/pages/counterfeit-alert",
-            "target_markets": ["US", "CA", "EU", "UK", "AU", "CN_EXPORT"],
-            "product_risk_profile": {
-                "category": "electronics_battery",
-                "safety_standards": ["UL", "CE", "UN38.3", "EU GPSR"],
-                "hazard_statement_en": "Counterfeit uncertified lithium-ion consumer hardware poses severe fire and safety hazards.",
-            },
-            "trademarks": [
-                {
-                    "jurisdiction": "US",
-                    "mark_text": "ACME",
-                    "reg_number": "US-CLASS12-SAMPLE",
-                    "status": "registered",
-                    "nice_classes": [12],
-                    "expiry_date": "2036-01-01",
-                    "cert_file_path": "",
-                }
-            ],
-            "patents_and_designs": [],
-            "copyright_originals": [
-                {
-                    "asset_name": "Acme Flagship Official Product Gallery",
-                    "official_source_url": "https://acmesport.com/products/x1",
-                    "first_published_date": "2025-01-15",
-                    "description": "Original studio photos and copywriting.",
-                }
-            ],
-            "keyword_watch_patterns": ["acme", "acmetrack"],
-        }
+    def test_null_signer(self):
+        p = copy.deepcopy(self.profile); p["authorized_signatory"]["name"] = None
+        self.assertTrue(br.validate_profile(p))
 
-    def test_normalize_hostname_strips_scheme_port_path_and_trailing_dot(self) -> None:
-        self.assertEqual(
-            normalize_hostname("HTTPS://Shop.AcmeSport.com:443/products/x1?v=1"),
-            "shop.acmesport.com",
-        )
-        self.assertEqual(normalize_hostname("acmesports.com."), "acmesports.com")
-        self.assertEqual(normalize_hostname("-o/tmp/x"), "")
-        self.assertEqual(normalize_hostname("localhost"), "")
+    def test_invalid_enum(self):
+        p = copy.deepcopy(self.profile); p["product_risk_profile"] = {"category": "unknown"}
+        self.assertTrue(br.validate_profile(p))
 
-    def test_allowlist_defeats_backslash_userinfo_and_missing_slash_tricks(self) -> None:
-        allowlist = ["acmesport.com", "authorized-dealer.eu"]
-        self.assertTrue(is_allowlisted_url("https://acmesport.com/products/x1", allowlist))
-        self.assertTrue(is_allowlisted_url("https://Shop.AcmeSport.com:443/cart", allowlist))
-        self.assertTrue(is_allowlisted_url("https://acmesport.com\\foo", allowlist))
-        self.assertTrue(is_allowlisted_url("https://acmesport.com\\@evil.com", allowlist))
-        self.assertTrue(is_allowlisted_url("https:acmesport.com/foo", allowlist))
-        self.assertFalse(is_allowlisted_url("https://theacmesport.com/", allowlist))
-        self.assertFalse(is_allowlisted_url("https://acmesport.com.scam.shop/", allowlist))
-        self.assertFalse(is_allowlisted_url("https://acmesports.com/", allowlist))
+    def test_invalid_mark_status(self):
+        p = copy.deepcopy(self.profile); p["trademarks"] = [{"jurisdiction": "US", "mark_text": "Example", "status": "revoked"}]
+        self.assertTrue(br.validate_profile(p))
 
-    def test_sanitize_http_url_blocks_file_scheme_cli_flags_and_backslashes(self) -> None:
-        self.assertEqual(sanitize_http_url("https://acmesports.com/item?v=1"), "https://acmesports.com/item?v=1")
-        for malicious in (
-            "file://localhost/etc/passwd",
-            "ftp://acmesports.com/a",
-            "-o/tmp/pwn",
-            "https://-badhost.com/a",
-            "https://acmesport.com\\@evil.com",
-            "https://user:pass@acmesports.com/",
-        ):
-            with self.assertRaises(ValueError, msg=f"Should reject {malicious!r}"):
-                sanitize_http_url(malicious)
+    def test_common_law_does_not_require_fake_registration(self):
+        p = copy.deepcopy(self.profile); p["trademarks"] = [{"jurisdiction": "US", "mark_text": "Example", "status": "common_law"}]
+        self.assertEqual(br.validate_profile(p), [])
 
-    def test_validate_profile_catches_missing_entity_address_and_subfields(self) -> None:
-        valid = self._valid_sample_profile()
-        self.assertEqual(validate_profile(valid), [])
+    def test_class_range(self):
+        p = copy.deepcopy(self.profile); p["trademarks"] = [{"jurisdiction": "US", "mark_text": "Example", "status": "registered", "reg_number": "test", "nice_classes": [99]}]
+        self.assertTrue(br.validate_profile(p))
 
-        broken = dict(valid)
-        broken["entity_address"] = ""
-        broken["target_markets"] = ["US", "MARS"]
-        broken["official_domains"] = []
-        broken["trademarks"] = [{"jurisdiction": "US"}]
-        errors = validate_profile(broken)
-        self.assertTrue(any("entity_address" in err for err in errors))
-        self.assertTrue(any("official_domains" in err for err in errors))
-        self.assertTrue(any("MARS" in err for err in errors))
-        self.assertTrue(any("trademarks[0]" in err for err in errors))
+    def test_official_source_must_match_brand(self):
+        p = copy.deepcopy(self.profile); p["copyright_originals"][0]["official_source_url"] = "https://unrelated.example/"
+        self.assertTrue(br.validate_profile(p))
 
-    def test_register_and_load_brand_merges_official_into_allowlist(self) -> None:
-        profile = self._valid_sample_profile()
-        saved_path = register_brand(
-            brand_slug="acme",
-            data_dir=self.brand_data_dir,
-            profile=profile,
-            registry_path=self.registry_path,
-        )
-        self.assertTrue(saved_path.exists())
-        loaded_dir, loaded_profile = load_brand_profile("acme", registry_path=self.registry_path)
-        self.assertEqual(loaded_dir, self.brand_data_dir.resolve())
-        self.assertIn("acmesport.com", loaded_profile["allowlist_domains"])
-        self.assertIn("authorized-dealer.eu", loaded_profile["allowlist_domains"])
-        registry_data = json.loads(self.registry_path.read_text(encoding="utf-8"))
-        self.assertIn("acme", registry_data["brands"])
+    def test_same_directory_cannot_hold_two_brands(self):
+        p = copy.deepcopy(self.profile); p["brand_slug"] = "second-brand"; p.pop("brand_id")
+        with self.assertRaises(ConflictError):
+            br.register_brand("second-brand", self.brand, p, self.registry)
+        self.assertEqual(br.load_brand_profile("example-brand", self.registry)[1]["brand_slug"], "example-brand")
 
+    def test_corrupt_registry_preserved(self):
+        self.registry.write_text('{"brands":')
+        before = self.registry.read_bytes()
+        with self.assertRaises(ValueError):
+            br.register_brand("example-brand", self.brand, self.profile, self.registry)
+        self.assertEqual(self.registry.read_bytes(), before)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_profile_slug_tampering_rejected(self):
+        path = self.brand / "profile.json"; p = json.loads(path.read_text()); p["brand_slug"] = "another"; path.write_text(json.dumps(p))
+        with self.assertRaises(ConflictError):
+            br.load_brand_profile("example-brand", self.registry)
+
+    def test_repo_private_data_rejected(self):
+        with self.assertRaises(ValueError):
+            br.register_brand("example-brand", ROOT / "private-data", self.profile, self.registry)
+
+    def test_normalization(self):
+        self.assertEqual(br.normalize_hostname("HTTPS://Shop.Brand.Example:443/path"), "shop.brand.example")
+        self.assertEqual(br.sanitize_http_url("https://BRAND.example.:443"), "https://brand.example/")
+
+    def test_url_attack_matrix(self):
+        for url in ("file:///etc/passwd", "https://user:pass@host.example/", "https://brand.example\\@bad.example", "https://*.example/", "http://127.0.0.1/", "http://[::1]/", "https://host.example:9000/", "https://host.example:bad/", "https://host.example:65536/", "-o/tmp/a", "https://host.example/\nfoo"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                br.sanitize_http_url(url)
+
+    def test_allowlist_parser_tricks(self):
+        for value in ("https://brand.example/", "https:brand.example/x", "https://brand.example\\@bad.example", "https://brand.example@bad.example/", "https://sub.brand.example/"):
+            with self.subTest(value=value):
+                self.assertTrue(br.is_allowlisted_url(value, ["brand.example"]))
+        self.assertFalse(br.is_allowlisted_url("https://brand.example.bad.example/", ["brand.example"]))
+
+    def test_certificate_directory_not_file(self):
+        p = copy.deepcopy(self.profile); p["trademarks"] = [{"jurisdiction": "US", "mark_text": "Example", "status": "registered", "reg_number": "TEST", "cert_file_path": str(self.root)}]
+        self.assertTrue(br.validate_profile(p))
+
+    def test_private_permissions(self):
+        self.assertEqual((self.brand / "profile.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.brand.stat().st_mode & 0o777, 0o700)

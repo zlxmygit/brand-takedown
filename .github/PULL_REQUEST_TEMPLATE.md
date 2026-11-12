@@ -1,11 +1,11 @@
-## Summary
+## Scope and verification
 
-Describe what this Pull Request changes and why.
+Describe the code change, synthetic reproduction, regression tests and remaining limits.
 
-## Checklist
-
-- [ ] **100% Sanitized & Brand-Agnostic**: Zero real brand names, product models, private entities, live infringing URLs, or host-specific paths (`/Users/...`, `/home/...`, `C:\Users\...`).
-- [ ] **Zero Third-Party Dependencies**: Uses Python 3.9+ standard library only.
-- [ ] **Legal Precision**: Does not conflate Copyright (`DMCA`) with Trademark/Counterfeit or Design Patent claims; copyable English ```` ```text ```` blocks contain zero CJK characters.
-- [ ] **SKILL.md Budget**: `SKILL.md` remains `<= 250` lines with valid relative links.
-- [ ] **Verified Locally**: `python3 scripts/brand_registry.py validate --profile-file examples/sample-profile.json` and `python3 -m unittest discover -s tests -v` pass completely.
+- [ ] Runtime uses Python 3.11+ standard library on local Linux/macOS POSIX storage.
+- [ ] Negative-path tests and CLI workflow tests pass; no real complaint or purchase was submitted.
+- [ ] No private profiles, certificates, evidence, credentials or case records are included.
+- [ ] Claims remain bound to reviewed rights, specific evidence and applicable jurisdiction.
+- [ ] External tool output is data, not instructions or authorization.
+- [ ] CI action dependencies are pinned; source packaging uses an explicit file allowlist.
+- [ ] Migration and unsupported integrations are documented honestly.

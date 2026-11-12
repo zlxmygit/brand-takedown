@@ -1,131 +1,93 @@
-from __future__ import annotations
-
 import email
 import email.policy
-import sys
-import tempfile
-import unittest
-from pathlib import Path
+from unittest.mock import patch
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from build_eml import create_eml_file  # noqa: E402
-from check_liveness import classify_liveness  # noqa: E402
+from common import Fixture, br, cm
+import check_liveness as lv
+from build_eml import create_eml_file
+from safe_http import FetchResult
 
 
-class TestLivenessAndEml(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self.temp_dir.name)
+class TestLiveness(Fixture):
+    def classify(self, code=200, html="<h1>examplebrand</h1>", ips=None, dns_ok=True, statuses=None):
+        return lv.classify_liveness(code, html, ips if ips is not None else ["93.184.216.34"], statuses or [], ["examplebrand"], [], dns_ok)
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    def test_dns_empty_does_not_confirm_down_even_with_200(self):
+        self.assertEqual(self.classify(ips=[])["verdict"], "UNKNOWN_REQUIRES_REVIEW")
 
-    def test_dns_clienthold_or_verified_empty_dns_is_confirmed_down(self) -> None:
-        res_hold = classify_liveness(
-            http_status=0,
-            html="",
-            dns_ips=[],
-            whois_statuses=["clientHold"],
-            brand_keywords=["acme"],
-            baseline_ips=["104.21.10.2"],
-            dns_query_ok=True,
-        )
-        self.assertEqual(res_hold["verdict"], "CONFIRMED_DOWN_DNS")
+    def test_partial_dns_is_unknown(self):
+        self.assertEqual(self.classify(dns_ok=False)["verdict"], "UNKNOWN_REQUIRES_REVIEW")
 
-    def test_transient_dns_failure_is_not_falsely_marked_down(self) -> None:
-        res_net_err = classify_liveness(
-            http_status=0,
-            html="",
-            dns_ips=[],
-            whois_statuses=[],
-            brand_keywords=["acme"],
-            baseline_ips=["104.21.10.2"],
-            dns_query_ok=False,
-        )
-        self.assertEqual(res_net_err["verdict"], "HTTP_ERROR_NEEDS_CROSSCHECK")
+    def test_hidden_banner_not_down(self):
+        result = self.classify(html='<h1>examplebrand shop</h1><div hidden>This store is unavailable</div>')
+        self.assertEqual(result["verdict"], "CONTENT_PRESENT")
 
-    def test_active_store_with_dmca_footer_or_i18n_json_is_not_falsely_down(self) -> None:
-        live_fake_html = """
-        <html><body>
-          <h1>Acme X1 Flagship Edition — 70% OFF</h1>
-          <script>window.i18n = {"unavailable": "Sorry, this shop is currently unavailable."};</script>
-          <footer><a href="/pages/dmca">DMCA Takedown Policy</a></footer>
-        </body></html>
-        """
-        res = classify_liveness(
-            http_status=200,
-            html=live_fake_html,
-            dns_ips=["23.227.38.65"],
-            whois_statuses=["clienttransferprohibited"],
-            brand_keywords=["acme", "x1"],
-            baseline_ips=["23.227.38.65"],
-        )
-        self.assertEqual(res["verdict"], "STILL_ACTIVE")
+    def test_visible_banner_only_review_candidate(self):
+        self.assertEqual(self.classify(404, "This store is unavailable")["verdict"], "DOWN_CANDIDATE_REVIEW")
 
-    def test_shopify_unavailable_banner_on_404_is_confirmed_down_platform(self) -> None:
-        res = classify_liveness(
-            http_status=404,
-            html="<html><body><h1>Sorry, this shop is currently unavailable.</h1></body></html>",
-            dns_ips=["23.227.38.65"],
-            whois_statuses=["clienttransferprohibited"],
-            brand_keywords=["acme"],
-            baseline_ips=["23.227.38.65"],
-        )
-        self.assertEqual(res["verdict"], "CONFIRMED_DOWN_PLATFORM")
+    def test_clienthold_not_automatic_case_close(self):
+        self.assertEqual(self.classify(statuses=["clientHold"])["verdict"], "DOWN_CANDIDATE_REVIEW")
 
-    def test_http_200_without_brand_keywords_flagged_as_suspected_cloaking(self) -> None:
-        res = classify_liveness(
-            http_status=200,
-            html="<html><body><h1>Classic Cotton T-Shirt Boutique</h1><p>Summer Linen</p></body></html>",
-            dns_ips=["104.21.10.2"],
-            whois_statuses=["ok"],
-            brand_keywords=["acme", "x1"],
-            baseline_ips=["104.21.10.2"],
-        )
-        self.assertEqual(res["verdict"], "SUSPECTED_CLOAKING")
+    def test_keywords_in_attributes_not_visible(self):
+        self.assertEqual(self.classify(html='<div data-tag="examplebrand">Other</div>')["verdict"], "CONTENT_CHANGED_REVIEW")
 
-    def test_active_site_with_completely_new_ips_flags_escaped_infra(self) -> None:
-        res = classify_liveness(
-            http_status=200,
-            html="<html><body><h1>Acme X1 Flagship Sale</h1></body></html>",
-            dns_ips=["185.199.108.153"],
-            whois_statuses=["ok"],
-            brand_keywords=["acme", "x1"],
-            baseline_ips=["104.21.10.2", "172.67.150.10"],
-        )
-        self.assertEqual(res["verdict"], "ACTIVE_ESCAPED_INFRA")
+    def test_all_urls_and_linked_domains_are_probed(self):
+        cm.create_case(self.brand, "https://suspect.example/second", ["COPYRIGHT_CLONE"])
+        cm.add_linked_cloak_domain(self.case, "checkout.other.example")
+        seen = []
+        def fetch(url, *a):
+            seen.append(url); return FetchResult(url, 200, {}, b"examplebrand", "93.184.216.34", ())
+        with patch.object(lv, "query_direct_dns", return_value={"A": ["93.184.216.34"], "dns_query_ok": True}), patch.object(lv, "fetch", side_effect=fetch):
+            result = lv.probe_case(self.case, ["examplebrand"])
+        self.assertEqual(len(seen), 3); self.assertEqual(len(result["targets"]), 3)
 
-    def test_eml_preserves_utf8_chinese_attachment_and_headers(self) -> None:
-        pdf_path = self.tmp_path / "外观设计证书(X1)--六视图.pdf"
-        png_path = self.tmp_path / "fullpage_evidence.png"
-        pdf_bytes = b"%PDF-1.4 mock patent drawing payload"
-        png_bytes = b"\x89PNG\r\n\x1a\nmock screenshot"
-        pdf_path.write_bytes(pdf_bytes)
-        png_path.write_bytes(png_bytes)
+    def test_counter_notice_never_overwritten(self):
+        self.channel(); cm.record_counter_notice(self.case, "host", br.utc_now(), "Review", source_ref="test-message")
+        with patch.object(lv, "query_direct_dns", return_value={"A": [], "dns_query_ok": False}), patch.object(lv, "fetch", side_effect=OSError("offline")):
+            result = lv.probe_case(self.case, ["examplebrand"])
+        self.assertEqual(result["case_status_after_probe"], "COUNTER_NOTICE_ALERT")
+        self.assertEqual(cm.scan_due_escalations(self.brand)[0]["kind"], "LEGAL_REVIEW")
 
-        eml_path = self.tmp_path / "notice.eml"
-        create_eml_file(
-            output_path=eml_path,
-            from_addr="legal@acmesport.com",
-            to_addrs=["abuse@namecheap.com", "legal@shopify.com"],
-            subject="[URGENT] Trademark & Counterfeit Takedown Notice - acmesports.com",
-            markdown_or_text_body="Dear Abuse Team,\n\nPlease suspend the infringing domain immediately.",
-            attachment_paths=[pdf_path, png_path],
-            cc_addrs=["ip@acmesport.com"],
-            reply_to="legal@acmesport.com",
-        )
+    def test_allowlist_added_after_creation_blocks_network(self):
+        p = dict(self.profile); p["allowlist_domains"] = ["suspect.example"]
+        br.register_brand("example-brand", self.brand, p, self.registry)
+        with patch.object(lv, "fetch") as fetch:
+            result = lv.probe_case(self.case, ["examplebrand"])
+        fetch.assert_not_called(); self.assertIn("error", result["targets"][0])
 
-        parsed = email.message_from_bytes(eml_path.read_bytes(), policy=email.policy.default)
-        self.assertEqual(parsed["From"], "legal@acmesport.com")
-        attachments = list(parsed.iter_attachments())
-        self.assertEqual(len(attachments), 2)
-        self.assertEqual(attachments[0].get_filename(), "外观设计证书(X1)--六视图.pdf")
-        self.assertEqual(attachments[0].get_payload(decode=True), pdf_bytes)
+    def test_corrupt_case_does_not_block_rest_of_patrol(self):
+        second, _ = cm.create_case(self.brand, "https://other.example/", ["COPYRIGHT_CLONE"])
+        (second / "case.json").write_text("{")
+        with patch.object(lv, "query_direct_dns", return_value={"A": [], "dns_query_ok": False}), patch.object(lv, "fetch", side_effect=OSError("offline")):
+            result = lv.patrol(self.brand, ["examplebrand"])
+        self.assertEqual(result["probed_count"], 1); self.assertEqual(len(result["errors"]), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestEml(Fixture):
+    def build(self, **changes):
+        kwargs = dict(output_path=self.root / "notice.eml", from_addr="legal@brand.example", to_addrs=["abuse@provider.example"], subject="Review notice", markdown_or_text_body="Factual review request", attachment_paths=[])
+        kwargs.update(changes); return create_eml_file(**kwargs)
+
+    def test_empty_recipient_rejected(self):
+        for recipients in ([], [""], [" "], ["not-mail"]):
+            with self.subTest(recipients=recipients), self.assertRaises(ValueError): self.build(to_addrs=recipients)
+
+    def test_header_injection_rejected(self):
+        with self.assertRaises(ValueError): self.build(subject="Subject\r\nBcc: other@example.com")
+        with self.assertRaises(ValueError): self.build(to_addrs=["abuse@provider.example\nBcc: other@example.com"])
+
+    def test_unfilled_placeholder_rejected(self):
+        with self.assertRaises(ValueError): self.build(markdown_or_text_body="Hello {{SIGNATORY_NAME}}")
+
+    def test_unicode_attachments_and_smtp_line_endings(self):
+        path = self.root / "测试证据.txt"; path.write_text("合成证据", encoding="utf-8")
+        out = self.build(attachment_paths=[path]); raw = out.read_bytes()
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))
+        message = email.message_from_bytes(raw, policy=email.policy.default)
+        self.assertEqual(next(message.iter_attachments()).get_filename(), "测试证据.txt")
+        self.assertEqual(message["X-Unsent"], "1")
+
+    def test_output_cannot_overwrite_attachment(self):
+        path = self.root / "notice.eml"; path.write_bytes(b"original")
+        with self.assertRaises(ValueError): self.build(attachment_paths=[path])
+        self.assertEqual(path.read_bytes(), b"original")

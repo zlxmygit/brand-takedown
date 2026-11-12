@@ -1,57 +1,54 @@
-name: CI
-
+name: Safety and regression CI
 on:
   push:
-    branches:
-      - main
-    tags:
-      - "v*"
+    branches: [main, "fix/audit-hardening-*"]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
+concurrency:
+  group: safety-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  test-and-audit:
-    name: Verify (${{ matrix.os }}, Python ${{ matrix.python-version }})
+  verify:
+    name: Verify (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            python-version: "3.9"
-          - os: macos-latest
-            python-version: "3.12"
-          - os: ubuntu-latest
-            python-version: "3.10"
-          - os: ubuntu-latest
-            python-version: "3.12"
-
+        os: [ubuntu-24.04, macos-15]
+        python: ["3.11", "3.13"]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Guard against private brand artifacts or evidence leaks
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Verify exact locally tested sources
+        run: >-
+          python -c 'import hashlib,json,pathlib; d=json.loads(pathlib.Path("docs/source-checksums.json").read_text()); bad=[p for p,h in d["files"].items() if hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()!=h]; assert not bad,bad; print("Verified",len(d["files"]),"source files")'
+      - name: Compile and diagnose
+        run: |
+          python -m compileall -q scripts tests
+          python scripts/doctor.py
+          python scripts/brand_registry.py validate --profile-file examples/sample-profile.json
+      - name: Offline negative and workflow tests
+        run: python -m unittest discover -s tests -v
+      - name: Tracked private artifact guard
+        shell: bash
         run: |
           set -euo pipefail
-          FORBIDDEN=$(git ls-files | grep -E '\.(eml|pdf|png|jpg|jpeg|har)$|(^|/)(profile|registry|case|evidence-manifest|recon-report)\.json$' || true)
-          if [ -n "$FORBIDDEN" ]; then
-            echo "ERROR: Private brand or case artifacts detected in tracked files:"
-            echo "$FORBIDDEN"
+          if git ls-files | grep -Ei '(^|/)(cases|certificates|evidence|packets)/|(^|/)(profile|registry|case|radar_seen|evidence-manifest|recon-report)\.json$|\.(eml|pdf|png|jpe?g|har|pem|key)$|(^|/)\.env($|\.)'; then
+            echo 'Private runtime artifacts must not be tracked.'
             exit 1
           fi
-
-      - name: Validate generic sample profile against schema
-        run: python3 scripts/brand_registry.py validate --profile-file examples/sample-profile.json
-
-      - name: Run unit and skill integrity test suite
-        run: python3 -m unittest discover -s tests -v
+      - name: Deterministic generic package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/package_skill.py --out "$RUNNER_TEMP/brand-takedown-a.zip"
+          python scripts/package_skill.py --out "$RUNNER_TEMP/brand-takedown-b.zip"
+          cmp "$RUNNER_TEMP/brand-takedown-a.zip" "$RUNNER_TEMP/brand-takedown-b.zip"

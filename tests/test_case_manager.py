@@ -1,185 +1,112 @@
-from __future__ import annotations
-
-import contextlib
-import io
+from datetime import datetime, timedelta, timezone
 import json
-import sys
-import tempfile
-import unittest
-from pathlib import Path
+from unittest.mock import patch
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from case_manager import (  # noqa: E402
-    _main as case_cli_main,
-    add_linked_cloak_domain,
-    advance_escalation_tier,
-    create_case,
-    record_counter_notice,
-    scan_due_escalations,
-    update_channel_fields,
-    upsert_channel,
-)
+from common import Fixture, br, cm, packets
+from storage import ConflictError
 
 
-class TestCaseManager(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.brand_dir = Path(self.temp_dir.name) / "acme"
-        (self.brand_dir / "cases").mkdir(parents=True, exist_ok=True)
-        self.allowlist = ["acmesport.com"]
-        self.case_dir, self.case_data = create_case(
-            brand_dir=self.brand_dir,
-            target_url="https://acmesports.com/products/x1",
-            infringement_types=["COPYRIGHT_CLONE", "TRADEMARK_IMPERSONATION", "COUNTERFEIT_GOODS"],
-            allowlist_domains=self.allowlist,
-            now_iso="2026-11-01T00:00:00Z",
-        )
+class TestCaseManager(Fixture):
+    def test_domain_collision_preserves_channels(self):
+        first, _ = cm.create_case(self.brand, "https://a.b.example/", ["COPYRIGHT_CLONE"])
+        cm.upsert_channel(first, "a", "ENFORCEMENT_SLA", "hosting", "Provider", "abuse@provider.example")
+        second, _ = cm.create_case(self.brand, "https://a-b.example/", ["COPYRIGHT_CLONE"])
+        self.assertNotEqual(first, second); self.assertEqual(len(cm.load_case(first)["channels"]), 1)
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    def test_same_host_merge(self):
+        same, data = cm.create_case(self.brand, "https://suspect.example/second", ["COPYRIGHT_CLONE"])
+        self.assertEqual(same, self.case); self.assertEqual(len(data["target_urls"]), 2)
 
-    def test_create_case_blocks_allowlisted_domain_and_malformed_url(self) -> None:
-        with self.assertRaises(ValueError):
-            create_case(
-                brand_dir=self.brand_dir,
-                target_url="https://shop.acmesport.com/item",
-                infringement_types=["COPYRIGHT_CLONE"],
-                allowlist_domains=self.allowlist,
-            )
-        with self.assertRaises(ValueError):
-            create_case(
-                brand_dir=self.brand_dir,
-                target_url="file://localhost/etc/passwd",
-                infringement_types=["COPYRIGHT_CLONE"],
-                allowlist_domains=self.allowlist,
-            )
+    def test_unknown_type_rejected(self):
+        with self.assertRaises(ValueError): cm.create_case(self.brand, "https://other.example/", ["MISTYPED"])
 
-    def test_submitted_without_explicit_timestamp_auto_populates_sla_deadline(self) -> None:
-        updated = upsert_channel(
-            self.case_dir,
-            channel_id="stripe_abuse",
-            channel_class="ENFORCEMENT_SLA",
-            category="payment",
-            provider_name="Stripe",
-            target_endpoint="heretohelp@stripe.com",
-            status="SUBMITTED",
-        )
-        ch = updated["channels"][0]
-        self.assertTrue(bool(ch["submitted_at"]))
-        self.assertTrue(bool(ch["next_action_due_at"]))
+    def test_allowlist_enforced_even_empty_argument(self):
+        with self.assertRaises(ValueError): cm.create_case(self.brand, "https://brand.example/", ["COPYRIGHT_CLONE"], [])
 
-    def test_update_channel_cli_and_preserve_tier2_deadline_on_ticket_ack(self) -> None:
-        upsert_channel(
-            self.case_dir,
-            channel_id="registrar_abuse",
-            channel_class="ENFORCEMENT_SLA",
-            category="registrar",
-            provider_name="Namecheap",
-            target_endpoint="abuse@namecheap.com",
-            status="SUBMITTED",
-            sla_hours=72,
-            submitted_at="2026-11-01T00:00:00.123456789z",
-        )
-        advance_escalation_tier(
-            self.case_dir,
-            channel_id="registrar_abuse",
-            now_iso="2026-11-04T02:00:00+0000",
-            next_sla_hours=48,
-        )
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            rc = case_cli_main(
-                [
-                    "update-channel",
-                    "--case-dir",
-                    str(self.case_dir),
-                    "--channel-id",
-                    "registrar_abuse",
-                    "--ticket-ref",
-                    "NC-998877",
-                    "--status",
-                    "ACKNOWLEDGED",
-                ]
-            )
-        self.assertEqual(rc, 0)
-        cli_payload = json.loads(buf.getvalue())
-        self.assertEqual(cli_payload["channels"][0]["ticket_ref"], "NC-998877")
-        after_ack = update_channel_fields(self.case_dir, "registrar_abuse")
-        ch = after_ack["channels"][0]
-        self.assertEqual(ch["ticket_ref"], "NC-998877")
-        self.assertEqual(ch["escalation_tier"], 2)
-        self.assertEqual(ch["status"], "ESCALATED_TIER2")
-        self.assertEqual(ch["next_action_due_at"], "2026-11-06T02:00:00Z")
+    def test_cloak_allowlist_enforced_without_slug(self):
+        with self.assertRaises(ValueError): cm.add_linked_cloak_domain(self.case, "checkout.brand.example")
 
-        due = scan_due_escalations(self.brand_dir, now_iso="2026-11-06T03:00:00Z")
-        self.assertEqual(len(due), 1)
-        self.assertEqual(due[0]["submitted_at"], "2026-11-01T00:00:00Z")
-        self.assertEqual(due[0]["tier2_escalated_at"], "2026-11-04T02:00:00Z")
+    def test_cross_brand_case_path_rejected(self):
+        with self.assertRaises(ConflictError): cm.assert_case_brand(self.case, self.root / "other")
 
-    def test_regulatory_filing_never_triggers_sla_escalation(self) -> None:
-        upsert_channel(
-            self.case_dir,
-            channel_id="cbp_allegation",
-            channel_class="REGULATORY_FILING",
-            category="customs",
-            provider_name="US CBP",
-            target_endpoint="https://eallegations.cbp.gov/",
-            status="SUBMITTED",
-            submitted_at="2026-11-01T00:00:00Z",
-        )
-        upsert_channel(
-            self.case_dir,
-            channel_id="registrar_abuse",
-            channel_class="ENFORCEMENT_SLA",
-            category="registrar",
-            provider_name="Namecheap",
-            target_endpoint="abuse@namecheap.com",
-            status="SUBMITTED",
-            sla_hours=72,
-            submitted_at="2026-11-01T00:00:00Z",
-        )
-        due = scan_due_escalations(self.brand_dir, now_iso="2026-11-05T01:00:00Z")
-        self.assertEqual([item["channel_id"] for item in due], ["registrar_abuse"])
+    def test_submission_cannot_be_claimed_in_upsert(self):
+        with self.assertRaises(ValueError): cm.upsert_channel(self.case, "a", "ENFORCEMENT_SLA", "hosting", "Provider", "abuse@provider.example", status="SUBMITTED")
 
-    def test_counter_notice_ten_business_days_skips_weekends(self) -> None:
-        updated = record_counter_notice(
-            self.case_dir,
-            channel_id="shopify_dmca",
-            received_at_iso="2026-11-13T10:00:00.987654321Z",
-            summary="Infringer submitted counter-notice with suspected freight-forwarder address",
-        )
-        self.assertEqual(updated["status"], "COUNTER_NOTICE_ALERT")
-        self.assertTrue(
-            updated["counter_notices"][0]["legal_action_deadline_iso"].startswith("2026-11-27T10:00:00Z")
-        )
+    def test_unsubmitted_cannot_escalate(self):
+        self.channel()
+        with self.assertRaises(ConflictError): cm.advance_escalation_tier(self.case, "host")
 
-    def test_add_linked_cloak_domain_enforces_allowlist_and_deduplicates(self) -> None:
-        with self.assertRaises(ValueError):
-            add_linked_cloak_domain(
-                self.case_dir,
-                "https://checkout.acmesport.com/pay",
-                role="payment_b_site",
-                allowlist_domains=self.allowlist,
-            )
-        add_linked_cloak_domain(
-            self.case_dir,
-            "https://Pay-Safe-Checkout.shop/pay",
-            role="payment_b_site",
-            allowlist_domains=self.allowlist,
-        )
-        updated = add_linked_cloak_domain(
-            self.case_dir,
-            "pay-safe-checkout.shop",
-            role="payment_b_site",
-            allowlist_domains=self.allowlist,
-        )
-        self.assertEqual(len(updated["linked_payment_cloak_domains"]), 1)
-        self.assertEqual(updated["linked_payment_cloak_domains"][0]["domain"], "pay-safe-checkout.shop")
+    def test_submitted_requires_reviewed_packet_and_receipt(self):
+        self.channel()
+        with self.assertRaises(ValueError): cm.confirm_submission(self.case, "host", "PKT-" + "0"*32, "", br.utc_now())
 
+    def test_real_submission_sets_due(self):
+        self.submitted(); channel = cm.load_case(self.case)["channels"][0]
+        self.assertTrue(channel["submitted_at"]); self.assertTrue(channel["next_action_due_at"])
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_double_submission_rejected(self):
+        draft = self.submitted()
+        with self.assertRaises(ConflictError): cm.confirm_submission(self.case, "host", draft["packet_id"], "duplicate", br.utc_now())
+
+    def test_early_escalation_rejected(self):
+        self.submitted()
+        with self.assertRaises(ConflictError): cm.advance_escalation_tier(self.case, "host")
+
+    def test_escalation_only_plans_not_sends(self):
+        self.submitted(); old = cm.load_case(self.case)["channels"][0]
+        future = cm._format_iso_utc(datetime.now(timezone.utc) + timedelta(days=7))
+        new = cm.advance_escalation_tier(self.case, "host", future)["channels"][0]
+        self.assertEqual(new["status"], "SUBMITTED"); self.assertEqual(new["next_action_due_at"], old["next_action_due_at"])
+        self.assertEqual(new["pending_tier"], 2)
+
+    def test_resolved_cannot_escalate(self):
+        self.submitted(); cm.update_channel_fields(self.case, "host", "RESOLVED")
+        with self.assertRaises(ConflictError): cm.advance_escalation_tier(self.case, "host", "2030-01-01T00:00:00Z")
+
+    def test_need_more_info_stays_due(self):
+        self.submitted(); cm.update_channel_fields(self.case, "host", "NEED_MORE_INFO")
+        due = cm.scan_due_escalations(self.brand, "2030-01-01T00:00:00Z")
+        self.assertEqual(due[0]["kind"], "SUPPLEMENT_REVIEW")
+
+    def test_tier3_stays_in_review_queue(self):
+        self.submitted()
+        cm.mutate_case(self.case, "test_fixture", lambda d: d["channels"][0].update(status="ESCALATED_TIER3", escalation_tier=3))
+        due = cm.scan_due_escalations(self.brand, "2030-01-01T00:00:00Z")
+        self.assertEqual(due[0]["kind"], "TIER3_REVIEW")
+        with self.assertRaises(ConflictError): cm.advance_escalation_tier(self.case, "host", "2030-01-01T00:00:00Z")
+
+    def test_regulatory_channel_never_gets_commercial_due(self):
+        self.channel(channel_class="REGULATORY_FILING")
+        self.assertEqual(cm.scan_due_escalations(self.brand, "2030-01-01T00:00:00Z"), [])
+        with self.assertRaises(ConflictError): cm.advance_escalation_tier(self.case, "host")
+
+    def test_counter_notice_unknown_provider_date_no_fake_deadline(self):
+        self.channel(); d = cm.record_counter_notice(self.case, "host", br.utc_now(), "Review counter notice", source_ref="test-message")
+        task = d["counter_notices"][0]
+        self.assertNotIn("legal_action_deadline_iso", task); self.assertNotIn("earliest_restore_estimate", task)
+        self.assertEqual(d["status"], "COUNTER_NOTICE_ALERT")
+
+    def test_counter_notice_window_is_labeled_estimate(self):
+        self.channel(); d = cm.record_counter_notice(self.case, "host", "2026-11-14T10:00:00Z", "Review", "2026-11-13T10:00:00Z", "America/New_York", "test-message")
+        task = d["counter_notices"][0]
+        self.assertTrue(task["earliest_restore_estimate"].startswith("2026-11-27"))
+        self.assertTrue(task["latest_restore_estimate"].startswith("2026-12-03"))
+        self.assertTrue(task["requires_counsel_confirmation"])
+
+    def test_counter_notice_deduplicates_message(self):
+        self.channel()
+        for _ in range(2): cm.record_counter_notice(self.case, "host", br.utc_now(), "Review", source_ref="test-message")
+        self.assertEqual(len(cm.load_case(self.case)["counter_notices"]), 1)
+
+    def test_legal_task_has_separate_due_queue(self):
+        self.channel(); d = cm.record_counter_notice(self.case, "host", br.utc_now(), "Review", source_ref="test-message")
+        self.assertEqual(cm.scan_due_escalations(self.brand)[0]["kind"], "LEGAL_REVIEW")
+        cm.resolve_legal_task(self.case, d["counter_notices"][0]["task_id"], "Human Counsel", "Reviewed procedural status; documented disposition")
+        self.assertEqual(cm.scan_due_escalations(self.brand), [])
+
+    def test_naive_timestamps_rejected(self):
+        with self.assertRaises(ValueError): cm._parse_iso_utc("2026-11-12T12:00:00")
+
+    def test_corrupt_case_is_visible_not_silent(self):
+        (self.case / "case.json").write_text("{")
+        self.assertEqual(cm.scan_due_escalations(self.brand)[0]["kind"], "CASE_ERROR")

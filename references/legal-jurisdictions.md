@@ -1,35 +1,44 @@
-# 多法域法理路由矩阵与防驳回指南 (Legal Jurisdictions & Routing Matrix)
+# 法域与主张审核规则
 
-## 1. 铁律：严禁混淆版权 (`DMCA`)、商标 (`Trademark`) 与假货欺诈 (`Counterfeit/Phishing`)
+本文件是流程检查表，不是律师意见。来源核验记录见 [policy-sources.json](policy-sources.json)。
+提交前重新核对现行法、服务商角色、目标市场、权利有效性及代表授权。
 
-| 侵权表现特征 | 适用核心法理 | 严禁踩坑事项 |
-| :--- | :--- | :--- |
-| **直接盗用官网原创产品实拍图、宣传视频、详情页文案、扒取前端 HTML/CSS 代码** | **版权侵权 (Copyright Infringement)**<br>- 北美：`17 U.S.C. § 512(c)/(d)` (DMCA)<br>- 加拿大：`Copyright Act Notice-and-Notice`<br>- 欧盟：`InfoSoc Directive 2001/29/EC` + `DSA Art. 16`<br>- 英国：`CDPA 1988` | **无需商标下证即可立即发起**！核心必填项是提供我方官网首发原始作品 URL（`official_source_url`）与侵权页盗图 URL 的一一对照及伪证罪声明（`under penalty of perjury`）。 |
-| **域名含品牌词、页面冒用品牌名称/LOGO、销售非正品授权的假货（即使对方自己重拍了图片或换了背景）** | **商标侵权与假冒商品 (Trademark & Counterfeit)**<br>- 美国（已注册）：`Lanham Act § 32 (15 U.S.C. § 1114)`<br>- 美国（未下证/申请中/使用在先）：`Lanham Act § 43(a) (15 U.S.C. § 1125(a))` 虚假原产地标识与不正当竞争<br>- 加拿大：`Trademarks Act s. 7(b) Passing Off` & `s. 20`<br>- 欧盟：`EUTMR Regulation (EU) 2017/1001 Art. 9` + `DSA Art. 16`<br>- 英国：`Trade Marks Act 1994 s. 10`<br>- 澳大利亚：`Trade Marks Act 1995 s. 120` & `Australian Consumer Law s. 18` | **严禁在纯商标/假货但未盗图的案件中套用纯 DMCA 模板**，否则 Shopify / Google / 主机商法务会以“DMCA 不涵盖商标争议”直接驳回！若同时盗图且冒用商标，必须分列 **Part I: Copyright (DMCA)** 与 **Part II: Trademark & Counterfeit** 双重主张。 |
-| **抄袭产品工业造型（即使抹掉 LOGO 改换别的牌子售卖同款模具假车/假产品）** | **外观设计专利 / 注册共同体外观设计**<br>- 欧盟：`Registered Community Design (RCD) Regulation (EC) No 6/2002 Art. 19`<br>- 英国：`UK Registered Designs Act 1949`<br>- 美国：`35 U.S.C. § 271 & § 289` (US Design Patent) | 随函必须附上外观设计专利证书 PDF 及 **产品六视图（6-View Drawings）与侵权商品角度对比图**。 |
-| **1:1 克隆官网外观、盗用我方公司名称/地址、骗取买家付款不发货或诱导填写信用卡** | **网络钓鱼、商业身份盗用与电信欺诈**<br>- 全球注册商：`ICANN 2013 RAA § 3.18` Abuse 强制处置条款<br>- 欧盟：`GDPR` 控制者虚假披露 + 企业身份盗用 (`Corporate Identity Theft`) | 不受民事知识产权抗辩拖延限制，直接定性为危害公共网络安全的欺诈基础设施，要求立即断网暂停。 |
+## 版权、商标、外观与欺诈分别核验
 
----
+COPYRIGHT：明确原作、权属和具体复制位置；美国 DMCA 17 U.S.C. § 512(c)(3) 通知需要完整联系信息、
+原作/侵权材料识别、善意和准确性/授权声明、签名。不能将纯商标争议塞进版权通知。
+当前生成器的 COPYRIGHT_NOTICE 仅支持经人工确认的美国 DMCA 路径。
 
-## 2. 按服务商所在地与目标市场的法域自动切换规则
+TRADEMARK / COUNTERFEIT：核对属地、登记/未登记状态、商品服务范围、有效性及实际混淆/假冒证据。
+未经授权转售不自动等同假货；考虑真实商品转售、权利用尽、描述性使用、合理使用和许可。
+15 U.S.C. §§ 1114、1125(a) 等依据不得混用或由品牌关键词自动选择。
+加拿大 Notice-and-Notice、Passing Off、欧盟商标、英国、澳大利亚及中国路径均须独立审核。
 
-### A. 北美市场与美国服务商 (`US` / `CA`)
-- **适用对象**：Shopify（加拿大/美国实体）、Cloudflare、Namecheap、GoDaddy、Stripe US、PayPal、DigitalOcean、AWS 等。
-- **法定必需要素 (`17 U.S.C. § 512(c)(3)` 法定 6 要素，缺一不可)**：
-  1. 被侵犯版权作品的明确标识及官网原始 URL；
-  2. 侵权材料在目标网站上的精确 URL（不能只写根域名，克隆整站需写明根域名 + 代表性侵权商品页 URL 列表）；
-  3. 投诉方完整联系信息（权利人实体英文全称、注册地址、官方企业邮箱、电话）；
-  4. **善意信念声明 (Good Faith Statement)**：`I have a good faith belief that use of the material in the manner complained of is not authorized by the copyright owner, its agent, or the law.`
-  5. **准确性与伪证罪授权声明 (Accuracy & Perjury Statement)**：`I swear, under penalty of perjury, that the information in this notification is accurate, and that I am the copyright/intellectual property owner or am authorized to act on behalf of the owner of an exclusive right that is allegedly infringed.`
-  6. 授权代表物理或电子签名（`/s/ <Authorized Signatory Name>`）。
+DESIGN：核对有效权利、保护范围、对比图及地域，不能从商品外形相似直接得出侵权结论。
+PHISHING：必须有具体冒充和凭证/资金诱骗事实，公开支付公钥、共享像素或平台源码只是线索。
+PRODUCT_SAFETY：须指定适用产品法规、具体要求和已观察缺陷，不能因品类包含锂电池就预填危险断言。
 
-### B. 欧洲市场与欧盟/欧洲服务商 (`EU` / `EEA` / `UK`)
-- **适用对象**：Hetzner（德国）、OVHcloud（法国）、Hostinger（立陶宛/塞浦路斯）、Leaseweb（荷兰）、Klarna（瑞典）以及任何向欧盟消费者展示欧元定价或支持欧盟配送的站点。
-- **核心武器 —— 欧盟《数字服务法案》(Digital Services Act, `Regulation (EU) 2022/2065`, `Article 16`)**：
-  - 欧洲主机商对美国 DMCA 并无法定义务，但对 **EU DSA Article 16 非法内容通知（Notice and Action Mechanism）** 负有法定审查、及时移除与出具书面裁决理由（Statement of Reasons, Art. 17）的强制义务！
-  - **DSA Article 16 必填四要素**：
-    1. 充分阐述为何该信息构成欧盟法或成员国法下的非法内容（`Illegal Content`：销售侵犯欧盟注册商标 `EUTMR`、欧盟注册外观设计 `RCD` 的假冒商品，以及违反欧盟《通用产品安全条例》`Regulation (EU) 2023/988` 的无证危险产品与欺诈行为）；
-    2. 侵权内容的精确电子位置（精确 URL 清单）；
-    3. 提交人的姓名/实体名称及电子邮箱；
-    4. **DSA 诚信准确声明**：`I hereby confirm my bona fide belief that the information and allegations contained in this notice are accurate and complete pursuant to Article 16(2)(d) of Regulation (EU) 2022/2065 (Digital Services Act).`
-- **英国 (`UK`)**：脱欧后独立援引 `UK Trade Marks Act 1994 s. 10`、`Electronic Commerce (EC Directive) Regulations 2002 Regulation 19`（知悉非法活动后丧失托管免责）及 `UK Registered Designs`。
+## EU DSA：角色与地域都要满足
+
+Regulation (EU) 2022/2065 Article 16 处理托管服务上的具体非法内容通知。
+仅凭支付机构身份、英国地址、欧元标价或一个 IP 不足以完成适用性判断。
+每案应记录服务角色、欧盟联系和具体非法内容依据。UK-only 不自动变成 EU DSA 案件。
+
+区分 Article 16(5) 对通知提交者的决定告知与 Article 17 对受限制服务接受者的理由说明。
+Article 53 的投诉资格、服务接受者所在地/设立地 DSC 路径及转送机制由审核人核对，
+不能一律按服务商总部发送。及时处理和免责条件不是“通知即自动侵权责任”。
+
+## NIS2 注册数据请求
+
+Directive (EU) 2022/2555 Article 28 的数据访问须结合国家实施、适用实体、合法利益、
+充分理由、必要性与数据保护审核。72 小时回复要求不能改写为必须无条件交出所有身份和账单资料。
+当前软件不自动生成 NIS2 披露请求；应由专业审核人选择最小必要数据并走真实官方流程。
+
+## 提交前门禁
+
+`packets.py` 将每项主张绑定真实目标、sealed capture、具体文件、权利索引、属地和来源核验。
+仍然必须由人判断证据真实性、权利范围、例外和法律适用，不能把结构校验当成律师结论。
+官方政策入口：
+- US Copyright Office: https://www.copyright.gov/512/
+- DSA: https://eur-lex.europa.eu/eli/reg/2022/2065
+- NIS2: https://eur-lex.europa.eu/eli/dir/2022/2555/oj/eng

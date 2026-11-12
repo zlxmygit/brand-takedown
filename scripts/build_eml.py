@@ -1,103 +1,108 @@
+"""Build an unsent SMTP-format message from a reviewed packet; never send mail."""
 from __future__ import annotations
 
 import argparse
+from email.headerregistry import Address
+from email.message import EmailMessage
+from email.policy import SMTP
+from email.utils import formatdate, make_msgid
 import json
 import mimetypes
-import sys
-from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
 from pathlib import Path
+import re
+import sys
+
+from brand_registry import DEFAULT_REGISTRY_PATH, is_allowlisted_url, load_brand_profile
+from case_manager import assert_case_brand, case_profile
+from packets import MAX_ATTACHMENTS_BYTES, PLACEHOLDERS, _packet_path, verify_approved_packet
+from storage import atomic_write_bytes, locked, safe_path
 
 
-def create_eml_file(
-    output_path: Path,
-    from_addr: str,
-    to_addrs: list[str],
-    subject: str,
-    markdown_or_text_body: str,
-    attachment_paths: list[Path],
-    cc_addrs: list[str] | None = None,
-    reply_to: str | None = None,
-) -> Path:
-    if not from_addr.strip():
-        raise ValueError("from_addr is required")
+def validate_address(value: str) -> str:
+    if not isinstance(value, str) or value != value.strip() or not re.fullmatch(r"[^\s@<>;,]+@[^\s@<>;,]+\.[^\s@<>;,]+", value):
+        raise ValueError("A single plain email address is required")
+    address = Address(addr_spec=value)
+    if not address.username or not address.domain:
+        raise ValueError("Invalid email address")
+    value.encode("ascii")
+    return value
+
+
+def create_eml_file(output_path: Path, from_addr: str, to_addrs: list[str], subject: str,
+                    markdown_or_text_body: str, attachment_paths: list[Path], cc_addrs=None, reply_to=None) -> Path:
+    # Public helper produces drafts only; the CLI additionally requires packet approval.
+    sender = validate_address(from_addr)
     if not to_addrs:
-        raise ValueError("at least one recipient in to_addrs is required")
-
-    msg = EmailMessage()
-    msg["From"] = from_addr.strip()
-    msg["To"] = ", ".join(addr.strip() for addr in to_addrs if addr.strip())
+        raise ValueError("At least one recipient is required")
+    recipients = [validate_address(addr) for addr in to_addrs]
+    if not subject.strip() or "\r" in subject or "\n" in subject or PLACEHOLDERS.search(subject + markdown_or_text_body):
+        raise ValueError("Invalid subject or unresolved placeholders")
+    if not markdown_or_text_body.strip():
+        raise ValueError("Empty message body")
+    message = EmailMessage(policy=SMTP)
+    message["From"] = sender; message["To"] = ", ".join(recipients)
     if cc_addrs:
-        clean_cc = [addr.strip() for addr in cc_addrs if addr.strip()]
-        if clean_cc:
-            msg["Cc"] = ", ".join(clean_cc)
-    if reply_to and reply_to.strip():
-        msg["Reply-To"] = reply_to.strip()
-
-    msg["Subject"] = subject.strip()
-    msg["Date"] = formatdate(localtime=True)
-    domain_part = from_addr.partition("@")[2].strip() or "brand-protection.local"
-    msg["Message-ID"] = make_msgid(domain=domain_part)
-    msg.set_content(markdown_or_text_body, subtype="plain", charset="utf-8")
-
-    for att in attachment_paths:
-        resolved = att.expanduser().resolve()
-        if not resolved.is_file():
-            raise FileNotFoundError(f"Attachment not found: {resolved}")
-        guessed_type, _ = mimetypes.guess_type(resolved.name)
-        if guessed_type and "/" in guessed_type:
-            maintype, subtype = guessed_type.split("/", 1)
-        else:
-            maintype, subtype = "application", "octet-stream"
-        msg.add_attachment(
-            resolved.read_bytes(),
-            maintype=maintype,
-            subtype=subtype,
-            filename=resolved.name,
-        )
-
-    out = output_path.expanduser().resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(bytes(msg))
-    return out
+        message["Cc"] = ", ".join(validate_address(addr) for addr in cc_addrs)
+    if reply_to:
+        message["Reply-To"] = validate_address(reply_to)
+    message["Subject"] = subject; message["Date"] = formatdate(localtime=False)
+    message["Message-ID"] = make_msgid(domain=sender.split("@", 1)[1])
+    message["X-Unsent"] = "1"
+    message["X-Brand-Takedown-Mode"] = "draft-only"
+    message.set_content(markdown_or_text_body)
+    total = 0
+    for path in attachment_paths:
+        path = safe_path(path)
+        if not path.is_file() or path.stat().st_size + total > MAX_ATTACHMENTS_BYTES:
+            raise ValueError("Invalid attachment or total size exceeds 15 MiB")
+        content = path.read_bytes(); total += len(content)
+        if total > MAX_ATTACHMENTS_BYTES:
+            raise ValueError("Attachment grew beyond budget")
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        main, sub = mime.split("/", 1)
+        message.add_attachment(content, maintype=main, subtype=sub, filename=path.name)
+    output_path = safe_path(output_path)
+    if output_path in [safe_path(p) for p in attachment_paths]:
+        raise ValueError("Output must not overwrite an input attachment")
+    atomic_write_bytes(output_path, message.as_bytes(policy=SMTP))
+    return output_path
 
 
-def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build standard RFC 5322 .eml file with corporate From header & UTF-8 attachments.")
-    parser.add_argument("--out", type=Path, required=True, help="Output .eml path")
-    parser.add_argument("--from-addr", required=True, help="Official brand legal email address")
-    parser.add_argument("--to", nargs="+", required=True, help="Recipient email address(es)")
-    parser.add_argument("--cc", nargs="*", default=[], help="Optional CC address(es)")
-    parser.add_argument("--reply-to", default=None, help="Optional Reply-To address")
-    parser.add_argument("--subject", required=True, help="Email subject")
-    parser.add_argument("--body-file", type=Path, required=True, help="UTF-8 plain text / markdown file for email body")
-    parser.add_argument("--attachments", type=Path, nargs="*", default=[], help="Optional attachment file paths")
+def _build_approved_eml(case_dir: Path, packet_id: str, output_path: Path) -> Path:
+    packet = verify_approved_packet(case_dir, packet_id)
+    profile = case_profile(case_dir)
+    sender = validate_address(packet["from_addr"])
+    if not is_allowlisted_url(sender.split("@", 1)[1], profile["official_domains"]):
+        raise ValueError("Sender is not on an official brand domain")
+    endpoint = validate_address(packet["endpoint"])
+    directory = _packet_path(case_dir, packet_id)
+    if safe_path(output_path).parent != directory or output_path.name != "notice.eml":
+        raise ValueError("Output must be this packet's notice.eml")
+    return create_eml_file(output_path, sender, [endpoint], packet["subject"],
+        (directory / "notice.txt").read_text(encoding="utf-8"), [directory / a["filename"] for a in packet["attachments"]])
 
+
+def build_approved_eml(case_dir: Path, packet_id: str, output_path: Path) -> Path:
+    case_dir = safe_path(case_dir)
+    with locked(case_dir.parent.parent / ".brand.lock"), locked(case_dir / ".case.lock"):
+        return _build_approved_eml(case_dir, packet_id, output_path)
+
+
+def _main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY_PATH)
+    parser.add_argument("--slug", required=True); parser.add_argument("--case-dir", type=Path, required=True)
+    parser.add_argument("--packet-id", required=True)
     args = parser.parse_args(argv)
-    body_text = args.body_file.read_text(encoding="utf-8")
-    saved = create_eml_file(
-        output_path=args.out,
-        from_addr=args.from_addr,
-        to_addrs=args.to,
-        subject=args.subject,
-        markdown_or_text_body=body_text,
-        attachment_paths=args.attachments,
-        cc_addrs=args.cc,
-        reply_to=args.reply_to,
-    )
-    print(
-        json.dumps(
-            {
-                "eml_path": str(saved),
-                "size_bytes": saved.stat().st_size,
-                "attachment_count": len(args.attachments),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    directory, _ = load_brand_profile(args.slug, args.registry)
+    assert_case_brand(args.case_dir, directory)
+    out = _packet_path(args.case_dir, args.packet_id) / "notice.eml"
+    print(json.dumps({"eml_path": str(build_approved_eml(args.case_dir, args.packet_id, out)), "sent": False}))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    try:
+        sys.exit(_main())
+    except (ValueError, OSError, KeyError) as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr); sys.exit(2)

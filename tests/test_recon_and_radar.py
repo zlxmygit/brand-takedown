@@ -1,179 +1,153 @@
-from __future__ import annotations
-
+import copy
 import hashlib
 import json
-import sys
-import tempfile
-import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from ct_radar import extract_candidate_domains_from_crt  # noqa: E402
-from recon_target import (  # noqa: E402
-    _build_curl_cmd,
-    _build_dig_cmd,
-    _filter_valid_ips,
-    _parse_der_cert_with_openssl,
-    build_evidence_manifest,
-    extract_storefront_fingerprints,
-    parse_whois_summary,
-    refresh_case_manifest,
-    run_recon,
-    trigger_wayback_save,
-)
+from common import Fixture, br, cm, recon
+import ct_radar as ct
+from safe_http import FetchResult
 
 
-class TestReconAndRadar(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp_dir.name)
+class TestRecon(Fixture):
+    def test_cross_target_recon_rejected_without_network(self):
+        with patch.object(recon, "fetch") as fetch, self.assertRaises(ValueError):
+            recon.run_recon("https://unrelated.example/", self.case)
+        fetch.assert_not_called()
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+    def test_empty_or_failed_fetch_does_not_lock(self):
+        with patch.object(recon, "query_direct_dns", return_value={"A": [], "AAAA": []}), patch.object(recon, "query_rdap", return_value={"ok": False}), patch.object(recon, "fetch", side_effect=OSError("offline")):
+            report = recon.run_recon("https://suspect.example/product", self.case)
+        self.assertEqual(report["capture_status"], "FAILED")
+        self.assertEqual(cm.load_case(self.case)["status"], "DISCOVERED")
+        self.assertTrue(recon.refresh_case_manifest(self.case)["verified"])
 
-    def test_extract_storefront_fingerprints_shopify_stripe_paypal_and_pixels(self) -> None:
-        sample_html = """
-        <html><head>
-        <script>
-          Shopify.shop = "scam-outlet-9921.myshopify.com";
-          window.ShopifyAnalytics = {"meta":{"page":{"customerId":null},"shopId":78123456789}};
-          var stripe = Stripe('pk_live_51NabcDEF1234567890xyz');
-          gtag('config', 'G-9X8Y7Z6W5V');
-          fbq('init', '123456789012345');
-        </script>
-        <script src="https://www.paypal.com/sdk/js?client-id=AbCdEfGhIjKlMnOp123&merchant-id=ZXCVBNM987654"></script>
-        </head><body>
-          <a href="mailto:support@acmesports.com">Contact</a>
-          <a href="https://wa.me/15551234567">WhatsApp</a>
-        </body></html>
-        """
-        headers = "HTTP/2 200\r\nx-shopid: 78123456789\r\nserver: cloudflare\r\n"
-        fp = extract_storefront_fingerprints(sample_html, headers)
-        self.assertEqual(fp["platform"], "shopify")
-        self.assertEqual(fp["shopify_domain"], "scam-outlet-9921.myshopify.com")
-        self.assertEqual(fp["shopify_shop_id"], "78123456789")
-        self.assertIn("pk_live_51NabcDEF1234567890xyz", fp["stripe_publishable_keys"])
-        self.assertIn("ZXCVBNM987654", fp["paypal_identifiers"])
-        self.assertIn("G-9X8Y7Z6W5V", fp["ga_ids"])
-        self.assertIn("123456789012345", fp["meta_pixel_ids"])
+    def test_empty_success_not_usable_evidence(self):
+        self.assertEqual(self.capture(b"")["capture_status"], "PARTIAL")
+        self.assertEqual(cm.load_case(self.case)["status"], "DISCOVERED")
 
-    def test_filter_valid_ips_excludes_cname_strings_and_dig_errors(self) -> None:
-        raw_lines = [
-            "shop.myshopify.com",
-            ";; connection timed out; no servers could be reached",
-            "23.227.38.65",
-            "2620:127:f00f:5::",
-        ]
-        self.assertEqual(_filter_valid_ips(raw_lines), ["23.227.38.65", "2620:127:f00f:5::"])
+    def test_raw_non_utf8_preserved(self):
+        raw = b"\xff\xfe\x00\x80"; report = self.capture(raw)
+        self.assertEqual((self.case / "evidence" / report["capture_id"] / "raw.bin").read_bytes(), raw)
 
-    def test_curl_command_enforces_proto_globoff_suppress_connect_and_noproxy(self) -> None:
-        head_cmd = _build_curl_cmd("https://acmesports.com/", head_only=True, proxy=None, referer=None)
-        self.assertIn("--proto", head_cmd)
-        self.assertIn("=http,https", head_cmd)
-        self.assertIn("--globoff", head_cmd)
-        self.assertIn("--suppress-connect-headers", head_cmd)
-        self.assertIn("--noproxy", head_cmd)
-        self.assertEqual(head_cmd[-2:], ["--", "https://acmesports.com/"])
+    def test_repeated_capture_preserves_original(self):
+        first = self.capture(b"first"); second = self.capture(b"second")
+        self.assertNotEqual(first["capture_id"], second["capture_id"])
+        self.assertEqual((self.case / "evidence" / first["capture_id"] / "raw.bin").read_bytes(), b"first")
+        self.assertEqual(len(cm.load_case(self.case)["captures"]), 2)
 
-    def test_macos_dig_command_has_no_unsupported_double_dash_and_executes_cleanly(self) -> None:
-        import subprocess
+    def test_tampering_cannot_be_resealed(self):
+        report = self.capture(); directory = self.case / "evidence" / report["capture_id"]
+        original = (directory / "evidence-manifest.json").read_bytes()
+        (directory / "raw.bin").write_bytes(b"tampered")
+        with self.assertRaises(ValueError): recon.refresh_case_manifest(self.case)
+        self.assertEqual((directory / "evidence-manifest.json").read_bytes(), original)
 
-        cmd = _build_dig_cmd("example.com", "A")
-        self.assertNotIn("--", cmd)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
-        self.assertNotIn("Invalid option", proc.stdout + proc.stderr)
+    def test_manifest_itself_is_bound_to_case(self):
+        report = self.capture(); p = self.case / "evidence" / report["capture_id"] / "evidence-manifest.json"
+        p.write_text(p.read_text() + " ")
+        with self.assertRaises(ValueError): recon.verify_capture(self.case, report["capture_id"])
 
-    def test_macos_libressl_parses_der_certificate_metadata_including_san(self) -> None:
-        import subprocess
+    def test_nested_evidence_included(self):
+        directory = self.root / "capture"; (directory / "screenshots").mkdir(parents=True)
+        (directory / "screenshots" / "page.png").write_bytes(b"image")
+        result = recon.build_evidence_manifest(directory, "https://suspect.example/", [], False)
+        self.assertEqual(result["files"][0]["filename"], "screenshots/page.png")
 
-        key_path = self.base / "key.pem"
-        der_path = self.base / "cert.der"
-        subprocess.run(
-            [
-                "/usr/bin/openssl",
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-keyout",
-                str(key_path),
-                "-out",
-                str(der_path),
-                "-outform",
-                "DER",
-                "-days",
-                "1",
-                "-subj",
-                "/CN=acmesports.com",
-            ],
-            capture_output=True,
-            check=True,
-        )
-        meta = _parse_der_cert_with_openssl(der_path.read_bytes())
-        self.assertIn("acmesports.com", meta.get("subject", ""))
-        self.assertTrue(bool(meta.get("issuer")))
-        self.assertTrue(bool(meta.get("not_before")))
-        self.assertTrue(bool(meta.get("not_after")))
-        self.assertTrue(bool(meta.get("serial")))
+    def test_external_symlink_rejected(self):
+        directory = self.root / "capture"; directory.mkdir()
+        outside = self.root / "secret.txt"; outside.write_text("test")
+        (directory / "linked.txt").symlink_to(outside)
+        with self.assertRaises(ValueError): recon.build_evidence_manifest(directory, "https://suspect.example/", [], False)
 
-    def test_manifest_excludes_recon_report_and_refresh_syncs_report(self) -> None:
-        case_dir = self.base / "case_sync"
-        ev_dir = case_dir / "evidence"
-        ev_dir.mkdir(parents=True, exist_ok=True)
-        (ev_dir / "raw.html").write_bytes(b"<html>fake</html>")
-        (ev_dir / "recon-report.json").write_text('{"evidence_manifest": {}}', encoding="utf-8")
+    def test_capture_metadata_hashed(self):
+        report = self.capture(); manifest = recon.verify_capture(self.case, report["capture_id"])
+        self.assertIn("recon-report.json", [f["filename"] for f in manifest["files"]])
 
-        m1 = build_evidence_manifest(ev_dir, "https://acmesports.com/", ["23.227.38.65"], False)
-        names1 = [f["filename"] for f in m1["files"]]
-        self.assertIn("raw.html", names1)
-        self.assertNotIn("recon-report.json", names1)
+    def test_refresh_preserves_original_time(self):
+        report = self.capture(); first = recon.verify_capture(self.case, report["capture_id"])
+        result = recon.refresh_case_manifest(self.case)
+        self.assertEqual(result["captures"][0]["captured_at_utc"], first["captured_at_utc"])
 
-        shot = ev_dir / "screenshot.png"
-        shot_bytes = b"\x89PNG\r\n\x1a\nshot"
-        shot.write_bytes(shot_bytes)
-        m2 = refresh_case_manifest(case_dir)
-        names2 = [f["filename"] for f in m2["files"]]
-        self.assertIn("screenshot.png", names2)
-        report_after = json.loads((ev_dir / "recon-report.json").read_text(encoding="utf-8"))
-        self.assertEqual(report_after["evidence_manifest"]["files"], m2["files"])
-        shot_entry = [f for f in m2["files"] if f["filename"] == "screenshot.png"][0]
-        self.assertEqual(shot_entry["sha256"], hashlib.sha256(shot_bytes).hexdigest())
+    def test_no_stale_platform_files_shared(self):
+        one = self.capture(b"cdn.shopify.com"); two = self.capture(b"custom site")
+        self.assertEqual(one["fingerprints"]["platform_hint"], "shopify")
+        self.assertEqual(two["fingerprints"]["platform_hint"], "unknown")
 
-    def test_run_recon_and_wayback_abort_on_allowlist_and_file_scheme(self) -> None:
-        with self.assertRaises(ValueError):
-            run_recon("https://www.acmesport.com/x1", self.base / "c1", ["acmesport.com"])
-        with self.assertRaises(ValueError):
-            run_recon("file://localhost/etc/passwd", self.base / "c2", ["acmesport.com"])
-        with self.assertRaises(ValueError):
-            trigger_wayback_save("https://shop.acmesport.com/", allowlist_domains=["acmesport.com"])
+    def test_fingerprints_are_untrusted_leads(self):
+        result = recon.extract_storefront_fingerprints("Stripe('pk_live_abcdefghijklmnopqrst'); G-12345678")
+        self.assertEqual(result["confidence"], "UNVERIFIED_PAGE_CONTROLLED_LEADS")
+        self.assertEqual(len(result["stripe_publishable_keys"]), 1)
 
-    def test_parse_whois_summary_extracts_registrar_abuse_and_status(self) -> None:
-        raw_whois = """
-        Registrar: NameCheap, Inc.
-        Registrar IANA ID: 1068
-        Registrar Abuse Contact Email: abuse@namecheap.com
-        Domain Status: clientTransferProhibited
-        Name Server: NS1.CLOUDFLARE.COM
-        """
-        summary = parse_whois_summary(raw_whois)
-        self.assertEqual(summary["registrar"], "NameCheap, Inc.")
-        self.assertEqual(summary["registrar_iana_id"], "1068")
-        self.assertIn("abuse@namecheap.com", summary["abuse_emails"])
+    def test_dns_failure_not_authoritative_negative(self):
+        with patch.object(recon, "resolve_addresses", side_effect=OSError("timeout")):
+            result = recon.query_direct_dns("suspect.example")
+        self.assertFalse(result["dns_query_ok"]); self.assertFalse(result["negative_result_verified"])
 
-    def test_crt_wildcard_and_multiline_dedup_with_allowlist(self) -> None:
-        rows = [
-            {"name_value": "*.acmesports.com\nacmesports.com"},
-            {"name_value": "shop.acmesport.com\nACMEX1.COM"},
-            {"name_value": "-invalid.com"},
-        ]
-        found = extract_candidate_domains_from_crt(rows, ["acmesport.com"], set())
-        self.assertEqual(found, ["acmesports.com", "acmex1.com"])
+    def test_rdap_bootstrap_success(self):
+        bootstrap = FetchResult("https://data.iana.org/rdap/dns.json", 200, {}, json.dumps({"services": [[["example"], ["https://rdap.provider.example/"]]]}).encode(), "93.184.216.34", ())
+        response = FetchResult("https://rdap.provider.example/domain/suspect.example", 200, {}, b'{"objectClassName":"domain","ldhName":"suspect.example"}', "93.184.216.34", ())
+        with patch.object(recon, "fetch", side_effect=[bootstrap, response]):
+            self.assertTrue(recon.query_rdap("suspect.example")["ok"])
+
+    def test_rdap_failure_explicit(self):
+        with patch.object(recon, "fetch", side_effect=OSError("offline")):
+            result = recon.query_rdap("suspect.example")
+        self.assertFalse(result["ok"]); self.assertTrue(result["manual_lookup_required"])
+
+    def test_wayback_no_false_success(self):
+        with self.assertRaises(ValueError): recon.trigger_wayback_save("https://suspect.example/", [])
+
+    def test_user_evidence_appends(self):
+        original = self.capture(); source = self.root / "reviewed-image.png"; source.write_bytes(b"image")
+        recon.add_evidence(self.case, "https://suspect.example/product", source)
+        self.assertEqual(len(cm.load_case(self.case)["captures"]), 2)
+        recon.verify_capture(self.case, original["capture_id"])
 
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_reserved_user_evidence_names_rejected(self):
+        for name in ("evidence-manifest.json", ".evidence.lock", "recon-report.json", "headers.json"):
+            source = self.root / name; source.write_text("synthetic")
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                recon.add_evidence(self.case, "https://suspect.example/product", source)
+
+    def test_empty_user_evidence_rejected(self):
+        source = self.root / "empty.txt"; source.write_bytes(b"")
+        with self.assertRaises(ValueError): recon.add_evidence(self.case, "https://suspect.example/product", source)
+
+    def test_malformed_rdap_shape_reports_error(self):
+        result = FetchResult("https://data.iana.org/rdap/dns.json", 200, {}, b'{"services":null}', "93.184.216.34", ())
+        with patch.object(recon, "fetch", return_value=result):
+            self.assertFalse(recon.query_rdap("suspect.example")["ok"])
+
+
+class TestRadar(Fixture):
+    def test_failure_not_successful_empty_scan(self):
+        with patch.object(ct, "_fetch_crt_json", side_effect=ValueError("bad JSON")):
+            result = ct.run_radar_scan(self.brand, self.profile)
+        self.assertEqual(result["status"], "FAILED"); self.assertTrue(result["errors"])
+
+    def test_pending_survives_second_scan(self):
+        with patch.object(ct, "_fetch_crt_json", return_value=[{"name_value": "examplebrand-suspect.example"}]):
+            first = ct.run_radar_scan(self.brand, self.profile); second = ct.run_radar_scan(self.brand, self.profile)
+        self.assertEqual(first["pending_domains"], second["pending_domains"])
+        self.assertEqual(second["pending_count"], 1)
+
+    def test_triage_is_explicit(self):
+        with patch.object(ct, "_fetch_crt_json", return_value=[{"name_value": "examplebrand-suspect.example"}]):
+            ct.run_radar_scan(self.brand, self.profile)
+            ct.triage(self.brand, "examplebrand-suspect.example", "REJECTED", "Human Reviewer", "Independent review found unrelated use")
+            self.assertEqual(ct.run_radar_scan(self.brand, self.profile)["pending_count"], 0)
+
+    def test_corrupt_seen_state_not_reset(self):
+        path = self.brand / "radar_seen.json"; path.write_text("{")
+        with patch.object(ct, "_fetch_crt_json", return_value=[]), self.assertRaises(ValueError): ct.run_radar_scan(self.brand, self.profile)
+        self.assertEqual(path.read_text(), "{")
+
+    def test_wildcard_allowlist_dedup(self):
+        result = ct.extract_candidate_domains_from_crt([{"name_value": "*.bad.example\nbad.example\nshop.brand.example"}], ["brand.example"], set())
+        self.assertEqual(result, ["bad.example"])
+
+    def test_cross_brand_profile_rejected(self):
+        p = copy.deepcopy(self.profile); p["brand_id"] = "another"
+        with self.assertRaises(ValueError): ct.run_radar_scan(self.brand, p)

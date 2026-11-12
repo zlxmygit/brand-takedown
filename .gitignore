@@ -1,14 +1,13 @@
-# Python bytecode & caches
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-
-# OS metadata
+.coverage
+htmlcov/
 .DS_Store
-Thumbs.db
-
-# Strictly exclude private brand profiles, certificates, case records & generated notices
+.env
+.env.*
+*.pem
+*.key
 brand-protection/
 cases/
 certificates/
@@ -16,9 +15,12 @@ packets/
 evidence/
 profile.json
 registry.json
+case.json
 radar_seen.json
 evidence-manifest.json
 recon-report.json
+approval.json
+packet.json
 *.eml
 *.pdf
 *.png
@@ -26,3 +28,6 @@ recon-report.json
 *.jpeg
 *.har
 *.tmp
+*.zip
+*.lock
+.write-*
