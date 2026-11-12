@@ -1,0 +1,93 @@
+{
+  "brand_slug": "acme-brand",
+  "brand_name": "Acme",
+  "legal_entity_name_en": "Acme Innovation Technology Co., Ltd.",
+  "legal_entity_name_local": "示例创新科技有限公司",
+  "entity_address": "100 Innovation Way, Suite 200, Austin, TX 78701, USA",
+  "authorized_signatory": {
+    "name": "Jane Doe",
+    "title": "Head of Brand Protection & Legal",
+    "legal_email": "legal@official-acme.example",
+    "forwarded_gmail": "brand-ops@gmail.com",
+    "phone": "+1-512-555-0199"
+  },
+  "official_domains": [
+    "official-acme.example"
+  ],
+  "allowlist_domains": [
+    "authorized-partner.eu",
+    "official-acme-uk.example"
+  ],
+  "official_product_urls": [
+    "https://official-acme.example/products/flagship-x1"
+  ],
+  "counterfeit_warning_url": "https://official-acme.example/pages/authentic-guarantee",
+  "target_markets": [
+    "US",
+    "CA",
+    "EU",
+    "UK",
+    "AU",
+    "CN_EXPORT"
+  ],
+  "product_risk_profile": {
+    "category": "electronics_battery",
+    "safety_standards": [
+      "UL",
+      "CE",
+      "UN38.3",
+      "EU GPSR"
+    ],
+    "hazard_statement_en": "Uncertified counterfeit products lack mandatory battery and electrical safety protections, posing severe fire and consumer injury hazards."
+  },
+  "trademarks": [
+    {
+      "jurisdiction": "US",
+      "mark_text": "ACME",
+      "reg_number": "7000001",
+      "status": "registered",
+      "nice_classes": [
+        9,
+        12
+      ],
+      "expiry_date": "2035-06-01",
+      "cert_file_path": ""
+    },
+    {
+      "jurisdiction": "EU",
+      "mark_text": "ACME",
+      "reg_number": "019000001",
+      "status": "registered",
+      "nice_classes": [
+        9,
+        12
+      ],
+      "expiry_date": "2035-06-01",
+      "cert_file_path": ""
+    }
+  ],
+  "patents_and_designs": [
+    {
+      "jurisdiction": "EU",
+      "type": "design",
+      "reg_number": "015000001-0001",
+      "product_model": "Flagship X1",
+      "expiry_date": "2030-06-01",
+      "cert_file_path": "",
+      "drawings_file_path": ""
+    }
+  ],
+  "copyright_originals": [
+    {
+      "asset_name": "Official Studio Product Photography & Copywriting",
+      "official_source_url": "https://official-acme.example/products/flagship-x1",
+      "first_published_date": "2025-01-15",
+      "description": "Original hero banners, 360-degree product renders, and specification tables."
+    }
+  ],
+  "keyword_watch_patterns": [
+    "acme",
+    "acmex1",
+    "acmetrack"
+  ]
+}

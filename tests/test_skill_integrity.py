@@ -1,20 +1,30 @@
 from __future__ import annotations
 
+import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = SKILL_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from brand_registry import validate_profile  # noqa: E402
 
 
 class TestSkillIntegrity(unittest.TestCase):
     def test_non_test_assets_are_100_percent_brand_and_host_agnostic(self) -> None:
         host_path_re = re.compile(
-            r"(?:^|[\s\"'`=(]|file://)(?:/users/|/home/|c:\\users\\)[a-z0-9._-]+",
+            r"(?:^|[\s\"'`=(]|file://)(?:/users/|/home/|c:\\users\\)[a-z0-9]",
             re.IGNORECASE,
         )
-        for subdir in ("scripts", "references", "templates"):
-            for path in (SKILL_ROOT / subdir).iterdir():
+        for subdir in ("scripts", "references", "templates", "examples"):
+            dir_path = SKILL_ROOT / subdir
+            if not dir_path.exists():
+                continue
+            for path in dir_path.iterdir():
                 if path.is_file():
                     text = path.read_text(encoding="utf-8")
                     self.assertIsNone(
@@ -22,7 +32,15 @@ class TestSkillIntegrity(unittest.TestCase):
                         f"Host-specific filesystem path leaked in {path}",
                     )
 
-        for doc_name in ("SKILL.md", "README.md"):
+        for doc_name in (
+            "SKILL.md",
+            "README.md",
+            "LICENSE",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "CHANGELOG.md",
+        ):
             doc_path = SKILL_ROOT / doc_name
             if doc_path.is_file():
                 doc_text = doc_path.read_text(encoding="utf-8")
@@ -30,6 +48,27 @@ class TestSkillIntegrity(unittest.TestCase):
                     host_path_re.search(doc_text),
                     f"Host-specific filesystem path leaked in {doc_name}",
                 )
+
+    def test_community_governance_files_and_sample_profile_are_valid(self) -> None:
+        required_files = (
+            "LICENSE",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "CHANGELOG.md",
+            ".github/workflows/ci.yml",
+            ".github/PULL_REQUEST_TEMPLATE.md",
+            ".github/ISSUE_TEMPLATE/config.yml",
+            ".github/ISSUE_TEMPLATE/bug_report.yml",
+            ".github/ISSUE_TEMPLATE/channel_or_jurisdiction.yml",
+            "examples/sample-profile.json",
+        )
+        for rel in required_files:
+            full = SKILL_ROOT / rel
+            self.assertTrue(full.is_file(), f"Missing repository governance file: {rel}")
+
+        sample_data = json.loads((SKILL_ROOT / "examples" / "sample-profile.json").read_text(encoding="utf-8"))
+        self.assertEqual(validate_profile(sample_data), [])
 
     def test_references_exist_and_cover_core_jurisdictions_and_customs(self) -> None:
         expected_refs = {

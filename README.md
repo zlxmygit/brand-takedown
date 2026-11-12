@@ -1,5 +1,12 @@
 # `brand-takedown` — 通用品牌反假冒与全周期持续维权引擎 Skill
 
+[![CI](https://github.com/zlxmygit/brand-takedown/actions/workflows/ci.yml/badge.svg)](https://github.com/zlxmygit/brand-takedown/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/zlxmygit/brand-takedown/releases)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.9%20%7C%20zero--deps-success.svg)](#四-环境要求与安装方法)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+> **English Summary**: `brand-takedown` is a 100% brand-agnostic, zero-dependency Intellectual Property enforcement and anti-counterfeiting Agent Skill (`Python >= 3.9` stdlib only). It automates direct origin forensics (`WHOIS`/`DNS`/`TLS`/`SHA-256` vault), multi-jurisdiction legal routing (`US DMCA & Lanham Act`, `EU DSA Art. 16 & NIS2 Art. 28`, `EUTMR/RCD`, `UK TMA`, `CBP/EUIPO/HMRC/GACC` customs, `CPSC/GPSR` product safety), Gmail abuse-ticket monitoring, anti-cloaking liveness probes, 3-tier SLA escalation, and `crt.sh` typosquatting radar.
+
 `brand-takedown` 是一个面向 **Google Antigravity**（及兼容 `SKILL.md` 规范的 Agent 环境）构建的 **100% 品牌无关 (Brand-Agnostic)、零第三方包依赖、支持欧美中多法域精准路由与全生命周期状态追踪** 的知识产权维权与反假冒打击 Skill。
 
 它专为解决跨境品牌常见的三大顽疾而设计：
@@ -7,7 +14,23 @@
 2. **多品类欺诈店上架假冒伪劣商品 (`Counterfeit Storefronts`)**：利用建站 SaaS 批量铺设低价假货链接，损害品牌声誉并在高危品类（如大功率锂电载具、电子电器、儿童用品）引发严重安全合规连带风险。
 3. **虚假物流追踪配套诈骗站 (`Fake Logistics / Scam Enablers`)**：配合假单号伪造物流轨迹，拖延消费者信用卡拒付 (`Chargeback`) 争议窗口。
 
-> **隐私与数据物理隔离承诺**：本仓库仅包含通用的工作流路由、纯标准库取证/状态机脚本、多法域法务参考手册与脱敏文书模板，**不包含任何具体品牌的权利证书、私有配置或案件记录**。运行时产生的所有品牌档案与案件证据均存储在仓库外部的用户私有数据目录中，并通过 `.gitignore` 严格物理隔离。
+> **隐私与数据物理隔离承诺**：本仓库仅包含通用的工作流路由、纯标准库取证/状态机脚本、多法域法务参考手册与脱敏文书模板，**不包含任何具体品牌的权利证书、私有配置或案件记录**。运行时产生的所有品牌档案与案件证据均存储在仓库外部的用户私有数据目录中，并通过 [`.gitignore`](./.gitignore) 与 [GitHub Actions CI](./.github/workflows/ci.yml) 严格物理隔离。
+
+---
+
+## 目录导航
+
+- [一、 核心能力亮点](#一-核心能力亮点)
+- [二、 全渠道打击矩阵一览](#二-全渠道打击矩阵一览)
+- [三、 工作流与状态机架构](#三-工作流与状态机架构)
+- [四、 环境要求与安装方法](#四-环境要求与安装方法)
+- [五、 仓库目录结构](#五-仓库目录结构)
+- [六、 Skill 规范元信息与对话触发指南](#六-skill-规范元信息与对话触发指南)
+- [七、 通用品牌档案 (`profile.json`) 结构示例](#七-通用品牌档案-profilejson-结构示例)
+- [八、 企业邮箱 + Gmail 转发与定时巡检闭环](#八-企业邮箱--gmail-转发与定时巡检闭环)
+- [九、 CLI 工具使用速查](#九-cli-工具使用速查)
+- [十、 安全与法律合规硬护栏 (`Safety & Legal Guardrails`)](#十-安全与法律合规硬护栏-safety--legal-guardrails)
+- [十一、 运行测试套件与社区治理](#十一-运行测试套件与社区治理)
 
 ---
 
@@ -103,7 +126,18 @@ git clone https://github.com/zlxmygit/brand-takedown.git .agents/skills/brand-ta
 brand-takedown/
 ├── SKILL.md                                  # 顶层触发器、5 大工作流路由、安全护栏与完成标准 (<250行)
 ├── README.md                                 # 完整架构、安装与 CLI 使用文档
+├── LICENSE                                   # MIT 开源许可证
+├── SECURITY.md                               # 安全架构说明、敏感数据隔离红线与漏洞私密披露指南
+├── CONTRIBUTING.md                           # 新增法域/通道的贡献规范与零依赖测试门禁
+├── CODE_OF_CONDUCT.md                        # 社区行为准则与合法善意维权伦理承诺
+├── CHANGELOG.md                              # 版本发布演进记录
 ├── .gitignore                                # 严格拦截私有品牌档案、证书、案件记录与邮件附件入库
+├── .github/
+│   ├── workflows/ci.yml                      # 双平台 (Linux/macOS) 单元测试与零敏感文件入库门禁
+│   ├── ISSUE_TEMPLATE/                       # 结构化脱敏 Bug 反馈与新法域/新通道提案表单
+│   └── PULL_REQUEST_TEMPLATE.md              # PR 脱敏与法理准确性核验清单
+├── examples/
+│   └── sample-profile.json                   # 开箱即用的通用脱敏品牌档案示例（可直接用于校验测试）
 ├── scripts/
 │   ├── brand_registry.py                     # 多品牌档案注册、Schema 校验、RFC1123/反斜杠防绕过白名单守卫
 │   ├── recon_target.py                       # 源站直连 WHOIS/DNS/TLS 取证、代理隔离抓取、指纹提取与 SHA-256 清单
@@ -121,7 +155,7 @@ brand-takedown/
 │   ├── notices-saas-payment-phishing.md      # 第一梯队：支付冻资、SaaS 封店、浏览器红屏与假物流站申诉模板
 │   ├── notices-registrar-hosting-cdn.md      # 第二梯队：注册商 clientHold + NIS2 披露、北美 DMCA 与欧盟 DSA Art.16 模板
 │   └── notices-escalation-chaser.md          # 第三阶段：Tier-2 避风港丧失催办函与 Tier-3 ICANN/DSC 监管升级模板
-└── tests/                                    # 31 项纯标准库单元与真机 CLI 集成测试套件
+└── tests/                                    # 32 项纯标准库单元与真机 CLI 集成测试套件
     ├── test_brand_registry.py
     ├── test_case_manager.py
     ├── test_recon_and_radar.py
@@ -180,9 +214,9 @@ brand-takedown/
   "counterfeit_warning_url": "https://official-acme.example/pages/authentic-guarantee",
   "target_markets": ["US", "CA", "EU", "UK", "AU", "CN_EXPORT"],
   "product_risk_profile": {
-    "category": "consumer_hardware_lithium",
+    "category": "electronics_battery",
     "safety_standards": ["UL", "CE", "UN38.3", "EU GPSR"],
-    "hazard_statement_en": "Uncertified counterfeit products lack mandatory battery and mechanical safety protections, posing severe fire and consumer injury hazards."
+    "hazard_statement_en": "Uncertified counterfeit products lack mandatory battery and electrical safety protections, posing severe fire and consumer injury hazards."
   },
   "trademarks": [
     {
@@ -198,12 +232,12 @@ brand-takedown/
   "patents_and_designs": [
     {
       "jurisdiction": "EU",
-      "type": "registered_community_design",
-      "number": "015000001-0001",
-      "title": "Flagship X1 Exterior Design",
-      "status": "registered",
+      "type": "design",
+      "reg_number": "015000001-0001",
+      "product_model": "Flagship X1",
       "expiry_date": "2030-06-01",
-      "cert_file_path": "./certificates/EU-RCD-015000001.pdf"
+      "cert_file_path": "./certificates/EU-RCD-015000001.pdf",
+      "drawings_file_path": "./certificates/EU-RCD-015000001-views.pdf"
     }
   ],
   "copyright_originals": [
@@ -350,10 +384,22 @@ python3 scripts/build_eml.py \
 
 ---
 
-## 十一、 运行测试套件
+## 十一、 运行测试套件与社区治理
 
-本仓库内置 **31 项**纯标准库单元测试与真机 CLI 集成测试（涵盖反斜杠/`@` 白名单绕过防御、CLI 参数注入拦截、代理响应头隔离、macOS `dig` / `LibreSSL` 原生兼容、跨周末法定工作日计算、反斗篷 `Safe Page` 识别、UTF-8 中文证书附件编码以及 100% 品牌/主机路径脱敏检查）：
+### 1. 本地验证与单元测试
+本仓库内置 **32 项**纯标准库单元测试与真机 CLI 集成测试（涵盖反斜杠/`@` 白名单绕过防御、CLI 参数注入拦截、代理响应头隔离、macOS `dig` / `LibreSSL` 原生兼容、跨周末法定工作日计算、反斗篷 `Safe Page` 识别、UTF-8 中文证书附件编码、示例档案校验以及 100% 品牌/主机路径脱敏检查）：
 
 ```bash
+# 校验内置的通用脱敏品牌档案示例
+python3 scripts/brand_registry.py validate --profile-file examples/sample-profile.json
+
+# 运行全量单元测试与完整性校验
 python3 -m unittest discover -s tests -v
 ```
+
+### 2. 社区治理与开源协议
+- **安全与隐私隔离规范**：请参阅 [`SECURITY.md`](./SECURITY.md)
+- **贡献指南**：请参阅 [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- **行为准则与善意维权伦理**：请参阅 [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
+- **版本更新日志**：请参阅 [`CHANGELOG.md`](./CHANGELOG.md)
+- **开源许可证**：本项目基于 [`MIT License`](./LICENSE) 开源发布。

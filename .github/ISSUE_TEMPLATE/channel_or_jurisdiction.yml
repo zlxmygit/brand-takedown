@@ -1,0 +1,33 @@
+name: New Takedown Channel or Jurisdiction
+description: Propose adding or updating an abuse portal, payment processor, SaaS platform, or statutory jurisdiction
+title: "[Channel / Law]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Payment Processor / Acquirer
+        - E-Commerce SaaS Platform
+        - Domain Registrar / Registry
+        - Hosting / CDN / BGP ASN
+        - Anti-Phishing / Browser Blocklist / Search / Ads
+        - Customs / Product Safety Regulator
+        - National / Regional IP Statute
+    validations:
+      required: true
+  - type: input
+    id: official_portal
+    attributes:
+      label: Official Abuse Portal URL or Contact Endpoint
+      placeholder: "https://example-provider.com/legal/abuse"
+    validations:
+      required: true
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Required Evidence Fields, Statutory Basis & Typical SLA
+      description: Describe what fields, headers, or legal citations this channel requires (without sharing any real brand case data).
+    validations:
+      required: true

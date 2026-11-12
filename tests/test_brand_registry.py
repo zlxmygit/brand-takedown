@@ -50,8 +50,8 @@ class TestBrandRegistry(unittest.TestCase):
             "counterfeit_warning_url": "https://acmesport.com/pages/counterfeit-alert",
             "target_markets": ["US", "CA", "EU", "UK", "AU", "CN_EXPORT"],
             "product_risk_profile": {
-                "category": "consumer_hardware_lithium",
-                "safety_standards": ["UL 2849", "CE", "UN38.3", "EU GPSR"],
+                "category": "electronics_battery",
+                "safety_standards": ["UL", "CE", "UN38.3", "EU GPSR"],
                 "hazard_statement_en": "Counterfeit uncertified lithium-ion consumer hardware poses severe fire and safety hazards.",
             },
             "trademarks": [
