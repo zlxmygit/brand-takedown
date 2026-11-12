@@ -1,327 +1,290 @@
+"""Validated brand identity and shared URL policy. Standard library only."""
 from __future__ import annotations
 
 import argparse
+from datetime import date, datetime, timezone
 import json
 import os
+from pathlib import Path
 import re
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
+import uuid
 
-DEFAULT_REGISTRY_PATH = Path.home() / ".gemini" / "brand-protection" / "registry.json"
-VALID_MARKETS = {"US", "CA", "EU", "UK", "AU", "CN_EXPORT", "GLOBAL"}
-SLUG_PATTERN = re.compile(r"^[a-z0-9-]+$")
+from storage import ConflictError, atomic_write_json, locked, private_dir, read_json, safe_path
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_REGISTRY_PATH = Path(os.environ.get("BRAND_TAKEDOWN_REGISTRY", str(Path.home() / ".gemini/brand-protection/registry.json")))
+SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+VALID_MARKETS = {"US", "CA", "EU", "UK", "AU", "CN_EXPORT", "GLOBAL"}
+_atomic_write_json = atomic_write_json
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp_path, path)
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _validate_rfc1123_fqdn(candidate: str) -> str:
-    host = candidate.strip().lower().rstrip(".")
-    if host.startswith("*."):
-        host = host[2:]
-    if not host or len(host) > 253 or "." not in host or "\\" in host:
+    if not isinstance(candidate, str) or CONTROL_OR_SPACE_RE.search(candidate):
         return ""
     try:
-        ascii_host = host.encode("idna").decode("ascii")
+        host = candidate.lower().rstrip(".").encode("idna").decode("ascii")
     except UnicodeError:
         return ""
-    labels = ascii_host.split(".")
-    if len(labels) < 2:
+    labels = host.split(".")
+    if len(host) > 253 or len(labels) < 2 or labels[-1].isdigit():
         return ""
-    for label in labels:
-        if not LABEL_PATTERN.match(label):
-            return ""
-    if labels[-1].isdigit():
-        return ""
-    return ascii_host
+    return host if all(LABEL_PATTERN.fullmatch(label) for label in labels) else ""
 
 
-def normalize_hostname(url_or_domain: str) -> str:
-    raw = (url_or_domain or "").strip()
-    if not raw or raw.startswith("-") or CONTROL_OR_SPACE_RE.search(raw) or "\\" in raw:
+def normalize_hostname(value: str) -> str:
+    if not isinstance(value, str) or not value or value.startswith("-") or CONTROL_OR_SPACE_RE.search(value) or "\\" in value:
         return ""
-    if "://" in raw:
-        parsed = urlparse(raw)
-        if parsed.scheme.lower() not in ("http", "https"):
+    try:
+        parsed = urlsplit(value if "://" in value else "https://" + value)
+        if parsed.scheme.lower() not in ("http", "https") or parsed.username is not None or parsed.password is not None:
             return ""
-        host = parsed.hostname or ""
-    else:
-        if ":" in raw.split("/")[0] and not raw.split("/")[0].rpartition(":")[2].isdigit():
-            return ""
-        parsed = urlparse("https://" + raw)
-        host = parsed.hostname or ""
-    return _validate_rfc1123_fqdn(host)
+        _ = parsed.port
+        return _validate_rfc1123_fqdn(parsed.hostname or "")
+    except ValueError:
+        return ""
 
 
 def sanitize_http_url(url: str) -> str:
-    raw = (url or "").strip()
-    if not raw or raw.startswith("-"):
-        raise ValueError(f"Empty or flag-like URL rejected: {url!r}")
-    if CONTROL_OR_SPACE_RE.search(raw) or "\\" in raw:
-        raise ValueError(f"Malformed URL containing whitespace, control chars, or backslashes rejected: {url!r}")
-    parsed = urlparse(raw)
-    if parsed.scheme.lower() not in ("http", "https"):
-        raise ValueError(f"Only http/https URLs are allowed; got scheme {parsed.scheme!r} in {url!r}")
-    if parsed.username is not None or parsed.password is not None or "@" in (parsed.netloc or ""):
-        raise ValueError(f"URLs containing userinfo '@' are rejected for anti-spoofing safety: {url!r}")
-    fqdn = _validate_rfc1123_fqdn(parsed.hostname or "")
-    if not fqdn:
-        raise ValueError(f"Invalid RFC 1123 FQDN hostname in URL: {url!r}")
-    return raw
+    if not isinstance(url, str) or not url or CONTROL_OR_SPACE_RE.search(url) or "\\" in url:
+        raise ValueError("Malformed URL")
+    try:
+        parsed = urlsplit(url)
+        host = normalize_hostname(url)
+        if not host or parsed.scheme.lower() not in ("http", "https") or "://" not in url:
+            raise ValueError("Only HTTP(S) URLs with a valid domain are supported")
+        port = parsed.port
+        if port is not None and port != (443 if parsed.scheme.lower() == "https" else 80):
+            raise ValueError("Nonstandard ports are not supported")
+        if parsed.fragment:
+            raise ValueError("Fragments must be removed explicitly")
+        if any(ord(ch) > 127 for ch in parsed.path + parsed.query):
+            raise ValueError("Percent-encode non-ASCII paths and queries")
+        return urlunsplit((parsed.scheme.lower(), host, parsed.path or "/", parsed.query, ""))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(f"Unsafe URL: {url!r}") from exc
 
 
-def _extract_defensive_host_candidates(url_or_domain: str) -> list[str]:
-    raw = (url_or_domain or "").strip()
-    if not raw:
-        return []
-    repaired = raw.replace("\\", "/")
-    repaired = re.sub(r"^(https?):(?!//)/*", r"\1://", repaired, flags=re.IGNORECASE)
-    candidates: list[str] = []
-
-    strict = normalize_hostname(repaired)
-    if strict:
-        candidates.append(strict)
-
-    parsed = urlparse(repaired if "://" in repaired else "https://" + repaired)
-    netloc = parsed.netloc or ""
-    for part in netloc.split("@"):
-        host_only = part.split(":")[0]
-        fqdn = _validate_rfc1123_fqdn(host_only)
-        if fqdn and fqdn not in candidates:
-            candidates.append(fqdn)
-    return candidates
+def is_allowlisted_url(value: str, allowlist_domains: list[str]) -> bool:
+    # Conservative pre-validation check also recognizes misleading userinfo/backslashes.
+    raw = str(value or "").replace("\\", "/")
+    raw = re.sub(r"^(https?):(?!//)/*", r"\1://", raw, flags=re.I)
+    candidates = {normalize_hostname(raw)}
+    try:
+        netloc = urlsplit(raw if "://" in raw else "https://" + raw).netloc
+        candidates.update(_validate_rfc1123_fqdn(p.split(":")[0]) for p in netloc.split("@"))
+    except ValueError:
+        pass
+    allowed = [_validate_rfc1123_fqdn(d) for d in allowlist_domains]
+    return any(h and a and (h == a or h.endswith("." + a)) for h in candidates for a in allowed)
 
 
-def is_allowlisted_url(url_or_domain: str, allowlist_domains: list[str]) -> bool:
-    candidates = _extract_defensive_host_candidates(url_or_domain)
-    if not candidates:
-        return False
-    normalized_allow = [_validate_rfc1123_fqdn(str(item)) for item in (allowlist_domains or [])]
-    valid_allow = [a for a in normalized_allow if a]
-    for host in candidates:
-        for allowed in valid_allow:
-            if host == allowed or host.endswith("." + allowed):
-                return True
-    return False
+def profile_allowlist(profile: dict) -> list[str]:
+    return sorted(set(profile["official_domains"] + profile.get("allowlist_domains", [])))
 
 
-def validate_profile(profile: dict) -> list[str]:
-    errors: list[str] = []
-    if not isinstance(profile, dict):
-        return ["profile must be a JSON object"]
+def check_target(url: str, profile: dict) -> str:
+    if is_allowlisted_url(url, profile_allowlist(profile)):
+        raise ValueError("SAFETY ABORT: target is an official or authorized domain")
+    return sanitize_http_url(url)
 
-    slug = str(profile.get("brand_slug", "")).strip()
-    if not slug or not SLUG_PATTERN.match(slug):
-        errors.append("brand_slug is required and must match ^[a-z0-9-]+$")
 
-    for key in ("brand_name", "legal_entity_name_en", "entity_address"):
-        if not str(profile.get(key, "")).strip():
-            errors.append(f"{key} is required and cannot be empty")
-
-    signatory = profile.get("authorized_signatory")
-    if not isinstance(signatory, dict):
-        errors.append("authorized_signatory must be an object")
-    else:
-        for field in ("name", "title", "legal_email"):
-            if not str(signatory.get(field, "")).strip():
-                errors.append(f"authorized_signatory.{field} is required")
-
-    official_domains = profile.get("official_domains")
-    if not isinstance(official_domains, list) or len(official_domains) == 0:
-        errors.append("official_domains must be a non-empty list of domains")
-    else:
-        for dom in official_domains:
-            if not normalize_hostname(str(dom)):
-                errors.append(f"invalid domain in official_domains: {dom!r}")
-
-    allowlist_domains = profile.get("allowlist_domains", [])
-    if not isinstance(allowlist_domains, list):
-        errors.append("allowlist_domains must be a list of domain strings")
-    else:
-        for dom in allowlist_domains:
-            if not normalize_hostname(str(dom)):
-                errors.append(f"invalid domain in allowlist_domains: {dom!r}")
-
-    markets = profile.get("target_markets")
-    if not isinstance(markets, list) or len(markets) == 0:
-        errors.append("target_markets must be a non-empty list")
-    else:
-        for market in markets:
-            if market not in VALID_MARKETS:
-                errors.append(f"unsupported target market {market!r}; valid={sorted(VALID_MARKETS)}")
-
-    section_required_fields = {
-        "trademarks": ("jurisdiction", "mark_text", "reg_number", "status"),
-        "patents_and_designs": ("jurisdiction", "type", "reg_number"),
-        "copyright_originals": ("asset_name", "official_source_url"),
-    }
-    for section, req_fields in section_required_fields.items():
-        entries = profile.get(section, [])
-        if entries is None:
-            continue
-        if not isinstance(entries, list):
-            errors.append(f"{section} must be a list")
-            continue
-        for idx, item in enumerate(entries):
-            if not isinstance(item, dict):
-                errors.append(f"{section}[{idx}] must be an object")
-                continue
-            for req in req_fields:
-                if not str(item.get(req, "")).strip():
-                    errors.append(f"{section}[{idx}].{req} is required")
-            for cert_key in ("cert_file_path", "drawings_file_path"):
-                cert_val = str(item.get(cert_key, "")).strip()
-                if cert_val and not Path(cert_val).exists():
-                    errors.append(f"{section}[{idx}].{cert_key} does not exist: {cert_val}")
-
+def _schema_errors(value, schema: dict, path: str = "profile") -> list[str]:
+    """Validate the closed subset used by our checked-in schema (not a general JSON Schema engine)."""
+    errors = []
+    types = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool}
+    expected = schema.get("type")
+    if expected and (not isinstance(value, types[expected]) or expected == "integer" and isinstance(value, bool)):
+        return [f"{path}: expected {expected}"]
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: unsupported value")
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        for key in schema.get("required", []):
+            if key not in value:
+                errors.append(f"{path}.{key}: required")
+        for key, item in value.items():
+            if key in properties:
+                errors.extend(_schema_errors(item, properties[key], f"{path}.{key}"))
+            elif schema.get("additionalProperties") is False:
+                errors.append(f"{path}.{key}: unknown field")
+    elif isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            errors.append(f"{path}: too few items")
+        if schema.get("uniqueItems") and len({json.dumps(v, sort_keys=True) for v in value}) != len(value):
+            errors.append(f"{path}: duplicate items")
+        for index, item in enumerate(value):
+            errors.extend(_schema_errors(item, schema.get("items", {}), f"{path}[{index}]"))
+    elif isinstance(value, int) and not isinstance(value, bool):
+        if value < schema.get("minimum", value) or value > schema.get("maximum", value):
+            errors.append(f"{path}: outside allowed range")
+    elif isinstance(value, str):
+        if len(value.strip()) < schema.get("minLength", 0):
+            errors.append(f"{path}: empty value")
+        if len(value) > schema.get("maxLength", 100000):
+            errors.append(f"{path}: too long")
+        if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
+            errors.append(f"{path}: invalid format")
+        if schema.get("format") == "date" and value:
+            try:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ValueError()
+            except ValueError:
+                errors.append(f"{path}: invalid ISO date")
     return errors
 
 
-def register_brand(
-    brand_slug: str,
-    data_dir: Path,
-    profile: dict,
-    registry_path: Path = DEFAULT_REGISTRY_PATH,
-) -> Path:
-    normalized_profile = dict(profile)
-    normalized_profile["brand_slug"] = brand_slug.strip().lower()
-
-    raw_official = normalized_profile.get("official_domains")
-    raw_allow = normalized_profile.get("allowlist_domains", [])
-    if not isinstance(raw_official, list) or not isinstance(raw_allow, list):
-        errors = validate_profile(normalized_profile)
-        raise ValueError("Invalid brand profile:\n- " + "\n- ".join(errors))
-
-    official = [normalize_hostname(str(d)) for d in raw_official if normalize_hostname(str(d))]
-    existing_allow = [normalize_hostname(str(d)) for d in raw_allow if normalize_hostname(str(d))]
-    if len(official) != len(raw_official) or len(existing_allow) != len(raw_allow):
-        errors = validate_profile(normalized_profile)
-        raise ValueError("Invalid brand profile:\n- " + "\n- ".join(errors or ["malformed domain entry"]))
-
-    merged_allow: list[str] = []
-    for dom in official + existing_allow:
-        if dom not in merged_allow:
-            merged_allow.append(dom)
-    normalized_profile["official_domains"] = official
-    normalized_profile["allowlist_domains"] = merged_allow
-
-    errors = validate_profile(normalized_profile)
+def validate_profile(profile: dict, base_dir: Path | None = None) -> list[str]:
+    schema = read_json(ROOT / "templates/profile.schema.json")
+    errors = _schema_errors(profile, schema)
     if errors:
-        raise ValueError("Invalid brand profile:\n- " + "\n- ".join(errors))
-
-    resolved_dir = data_dir.expanduser().resolve()
-    (resolved_dir / "cases").mkdir(parents=True, exist_ok=True)
-    (resolved_dir / "certificates").mkdir(parents=True, exist_ok=True)
-
-    profile_path = resolved_dir / "profile.json"
-    _atomic_write_json(profile_path, normalized_profile)
-
-    registry_data: dict = {"brands": {}}
-    if registry_path.exists():
+        return errors
+    for section in ("official_domains", "allowlist_domains"):
+        for domain in profile.get(section, []):
+            if _validate_rfc1123_fqdn(domain) != domain:
+                errors.append(f"{section}: use a canonical ASCII domain: {domain!r}")
+    signatory = profile["authorized_signatory"]
+    if not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+", signatory["legal_email"]):
+        errors.append("authorized_signatory.legal_email: invalid email")
+    urls = profile.get("official_product_urls", []) + [c["official_source_url"] for c in profile.get("copyright_originals", [])]
+    if profile.get("counterfeit_warning_url"):
+        urls.append(profile["counterfeit_warning_url"])
+    for url in urls:
         try:
-            loaded = json.loads(registry_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict) and isinstance(loaded.get("brands"), dict):
-                registry_data = loaded
-        except json.JSONDecodeError:
-            registry_data = {"brands": {}}
-
-    registry_data["brands"][normalized_profile["brand_slug"]] = {
-        "brand_name": normalized_profile["brand_name"],
-        "data_dir": str(resolved_dir),
-        "profile_path": str(profile_path),
-        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    _atomic_write_json(registry_path, registry_data)
-    return profile_path
-
-
-def load_brand_profile(
-    brand_slug: str,
-    registry_path: Path = DEFAULT_REGISTRY_PATH,
-) -> tuple[Path, dict]:
-    if not registry_path.exists():
-        raise FileNotFoundError(f"Brand registry not found at {registry_path}")
-    registry_data = json.loads(registry_path.read_text(encoding="utf-8"))
-    entry = registry_data.get("brands", {}).get(brand_slug.strip().lower())
-    if not entry:
-        raise KeyError(f"Brand {brand_slug!r} is not registered in {registry_path}")
-    data_dir = Path(entry["data_dir"]).resolve()
-    profile_path = data_dir / "profile.json"
-    if not profile_path.exists():
-        raise FileNotFoundError(f"Profile missing at {profile_path}")
-    profile = json.loads(profile_path.read_text(encoding="utf-8"))
-    return data_dir, profile
+            sanitize_http_url(url)
+            if not is_allowlisted_url(url, profile["official_domains"]):
+                errors.append("Original/source URLs must be on an official domain")
+        except ValueError:
+            errors.append(f"Invalid source URL: {url!r}")
+    for section in ("trademarks", "patents_and_designs"):
+        for item in profile.get(section, []):
+            if item.get("status", "registered") == "registered" and not item.get("reg_number", "").strip():
+                errors.append(f"{section}: registered rights require reg_number")
+            for key in ("cert_file_path", "drawings_file_path"):
+                if item.get(key):
+                    path = Path(item[key]).expanduser()
+                    path = (base_dir or Path.cwd()) / path if not path.is_absolute() else path
+                    try:
+                        if not safe_path(path).is_file():
+                            errors.append(f"{section}.{key}: not a regular file")
+                    except ValueError as exc:
+                        errors.append(str(exc))
+    return errors
 
 
-def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Manage multi-brand profiles and allowlist checks.")
-    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY_PATH, help="Path to global registry.json")
+def register_brand(brand_slug: str, data_dir: Path, profile: dict, registry_path: Path = DEFAULT_REGISTRY_PATH) -> Path:
+    slug = brand_slug.strip().lower()
+    if not isinstance(profile, dict) or not SLUG_PATTERN.fullmatch(slug) or profile.get("brand_slug") != slug:
+        raise ValueError("Brand slug must match the profile")
+    data_dir = safe_path(data_dir)
+    if data_dir == ROOT or ROOT in data_dir.parents:
+        raise ValueError("Private brand data must be outside the skill repository")
+    errors = validate_profile(profile, data_dir)
+    if errors:
+        raise ValueError("Invalid brand profile: " + "; ".join(errors))
+    normalized = json.loads(json.dumps(profile))
+    for section in ("trademarks", "patents_and_designs"):
+        for item in normalized.get(section, []):
+            for key in ("cert_file_path", "drawings_file_path"):
+                if item.get(key):
+                    path = Path(item[key]).expanduser()
+                    item[key] = str(safe_path(data_dir / path if not path.is_absolute() else path))
+    errors = validate_profile(normalized, data_dir)
+    if errors:
+        raise ValueError("Invalid brand profile: " + "; ".join(errors))
+    registry_path = safe_path(registry_path)
+    with locked(registry_path.with_suffix(".lock")):
+        registry = read_json(registry_path) if registry_path.exists() else {"brands": {}}
+        if not isinstance(registry.get("brands"), dict):
+            raise ValueError("Invalid registry; restore a reviewed backup")
+        for key, entry in registry["brands"].items():
+            if key != slug and safe_path(Path(entry["data_dir"])) == data_dir:
+                raise ConflictError("Another brand already owns this directory")
+        existing = registry["brands"].get(slug)
+        if existing and safe_path(Path(existing["data_dir"])) != data_dir:
+            raise ConflictError("Brand relocation requires a reviewed migration")
+        private_dir(data_dir)
+        with locked(data_dir / ".brand.lock"):
+            path = data_dir / "profile.json"
+            prior = read_json(path) if path.exists() else None
+            if prior and prior.get("brand_slug") != slug:
+                raise ConflictError("Directory contains another brand")
+            brand_id = (prior or {}).get("brand_id") or str(uuid.uuid4())
+            if existing and existing.get("brand_id") not in (None, brand_id):
+                raise ConflictError("Registry/profile identity mismatch")
+            normalized["brand_id"] = brand_id
+            normalized["allowlist_domains"] = profile_allowlist(normalized)
+            atomic_write_json(path, normalized)
+            private_dir(data_dir / "cases")
+            private_dir(data_dir / "certificates")
+            registry["brands"][slug] = {"brand_id": brand_id, "brand_name": normalized["brand_name"],
+                                       "data_dir": str(data_dir), "updated_at": utc_now()}
+            atomic_write_json(registry_path, registry)
+    return path
+
+
+def profile_from_dir(data_dir: Path) -> dict:
+    profile = read_json(safe_path(data_dir) / "profile.json")
+    errors = validate_profile(profile, data_dir)
+    if errors or not profile.get("brand_id"):
+        raise ValueError("Invalid or legacy profile; re-register after review: " + "; ".join(errors))
+    return profile
+
+
+def load_brand_profile(brand_slug: str, registry_path: Path = DEFAULT_REGISTRY_PATH) -> tuple[Path, dict]:
+    registry_path = safe_path(registry_path)
+    with locked(registry_path.with_suffix(".lock")):
+        registry = read_json(registry_path)
+        entry = registry["brands"][brand_slug]
+        data_dir = safe_path(Path(entry["data_dir"]))
+        profile = profile_from_dir(data_dir)
+        if profile["brand_slug"] != brand_slug or profile["brand_id"] != entry.get("brand_id"):
+            raise ConflictError("Brand registry/profile identity mismatch")
+        return data_dir, profile
+
+
+def _main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY_PATH)
     sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p_init = sub.add_parser("init", help="Register or update a brand profile from a JSON file")
-    p_init.add_argument("--slug", required=True, help="Brand slug")
-    p_init.add_argument("--data-dir", type=Path, required=True, help="Directory to store brand cases and profile.json")
-    p_init.add_argument("--profile-file", type=Path, required=True, help="Input JSON file matching profile.schema.json")
-
-    p_val = sub.add_parser("validate", help="Validate a profile.json file")
-    p_val.add_argument("--profile-file", type=Path, required=True)
-
-    sub.add_parser("list", help="List all registered brands")
-
-    p_allow = sub.add_parser("check-allowlist", help="Exit 0 with JSON status showing whether URL hits allowlist")
-    p_allow.add_argument("--slug", required=True)
-    p_allow.add_argument("--url", required=True)
-
+    init = sub.add_parser("init")
+    init.add_argument("--slug", required=True)
+    init.add_argument("--data-dir", type=Path, required=True)
+    init.add_argument("--profile-file", type=Path, required=True)
+    val = sub.add_parser("validate")
+    val.add_argument("--profile-file", type=Path, required=True)
+    sub.add_parser("list")
+    allow = sub.add_parser("check-allowlist")
+    allow.add_argument("--slug", required=True)
+    allow.add_argument("--url", required=True)
     args = parser.parse_args(argv)
-
     if args.cmd == "validate":
-        data = json.loads(args.profile_file.read_text(encoding="utf-8"))
-        errs = validate_profile(data)
-        if errs:
-            print(json.dumps({"valid": False, "errors": errs}, ensure_ascii=False, indent=2))
-            return 1
-        print(json.dumps({"valid": True, "errors": []}, ensure_ascii=False, indent=2))
-        return 0
-
+        errors = validate_profile(read_json(args.profile_file), args.profile_file.parent)
+        result = {"valid": not errors, "errors": errors}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return int(bool(errors))
     if args.cmd == "init":
-        data = json.loads(args.profile_file.read_text(encoding="utf-8"))
-        saved = register_brand(args.slug, args.data_dir, data, registry_path=args.registry)
-        print(json.dumps({"status": "registered", "profile_path": str(saved)}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "list":
-        if not args.registry.exists():
-            print(json.dumps({"brands": {}}, ensure_ascii=False, indent=2))
-            return 0
-        print(args.registry.read_text(encoding="utf-8"))
-        return 0
-
-    if args.cmd == "check-allowlist":
-        _, prof = load_brand_profile(args.slug, registry_path=args.registry)
-        hit = is_allowlisted_url(args.url, prof.get("allowlist_domains", []))
-        print(
-            json.dumps(
-                {
-                    "url": args.url,
-                    "normalized_host": normalize_hostname(args.url),
-                    "allowlisted": hit,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        return 0
-
-    return 1
+        result = {"profile_path": str(register_brand(args.slug, args.data_dir, read_json(args.profile_file), args.registry))}
+    elif args.cmd == "list":
+        result = read_json(args.registry) if args.registry.exists() else {"brands": {}}
+    else:
+        _, profile = load_brand_profile(args.slug, args.registry)
+        clean = sanitize_http_url(args.url)
+        result = {"url": clean, "allowlisted": is_allowlisted_url(args.url, profile_allowlist(profile))}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    try:
+        sys.exit(_main())
+    except (ValueError, OSError, KeyError) as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        sys.exit(2)

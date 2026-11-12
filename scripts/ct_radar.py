@@ -1,127 +1,103 @@
+"""CT search with explicit errors and persistent human triage, not infringement detection."""
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import sys
-from datetime import datetime, timezone
 from pathlib import Path
+import sys
 from urllib.parse import quote
 
-from brand_registry import is_allowlisted_url, load_brand_profile, normalize_hostname
+from brand_registry import DEFAULT_REGISTRY_PATH, is_allowlisted_url, load_brand_profile, normalize_hostname, profile_allowlist, profile_from_dir, utc_now
+from safe_http import fetch
+from storage import atomic_write_json, locked, read_json, safe_path
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp_path, path)
-
-
-def extract_candidate_domains_from_crt(
-    crt_rows: list[dict],
-    allowlist_domains: list[str],
-    already_seen: set[str],
-) -> list[str]:
-    candidates: set[str] = set()
-    normalized_seen = {normalize_hostname(s) for s in already_seen if normalize_hostname(s)}
-
+def extract_candidate_domains_from_crt(crt_rows: list[dict], allowlist_domains: list[str], already_seen: set[str]) -> list[str]:
+    candidates = set()
     for row in crt_rows:
         if not isinstance(row, dict):
             continue
-        raw_names = str(row.get("name_value", "")) + "\n" + str(row.get("common_name", ""))
-        for line in raw_names.splitlines():
-            token = line.strip().lower()
-            if not token or " " in token or "@" in token:
-                continue
-            if token.startswith("*."):
-                token = token[2:]
-            host = normalize_hostname(token)
-            if not host or "." not in host:
-                continue
-            if host in normalized_seen:
-                continue
-            if is_allowlisted_url(host, allowlist_domains):
-                continue
-            candidates.add(host)
-
+        for name in (str(row.get("name_value", "")) + "\n" + str(row.get("common_name", ""))).splitlines():
+            name = name.strip().lower()
+            if name.startswith("*."):
+                name = name[2:]
+            host = normalize_hostname(name)
+            if host and host not in already_seen and not is_allowlisted_url(host, allowlist_domains):
+                candidates.add(host)
     return sorted(candidates)
 
 
 def _fetch_crt_json(keyword: str) -> list[dict]:
-    encoded_query = quote(f"%{keyword.strip().lower()}%")
-    url = f"https://crt.sh/?q={encoded_query}&output=json"
-    try:
-        proc = subprocess.run(
-            ["/usr/bin/curl", "-sS", "--max-time", "30", url],
-            capture_output=True,
-            text=True,
-            timeout=35,
-            check=False,
-        )
-        if proc.returncode != 0 or not proc.stdout.strip():
-            return []
-        parsed = json.loads(proc.stdout)
-        return parsed if isinstance(parsed, list) else []
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return []
+    response = fetch("https://crt.sh/?q=" + quote("%" + keyword.lower() + "%", safe="") + "&output=json")
+    if response.status != 200:
+        raise ValueError(f"CT service HTTP {response.status}")
+    rows = json.loads(response.body)
+    if not isinstance(rows, list):
+        raise ValueError("CT service returned a non-list JSON response")
+    return rows
 
 
 def run_radar_scan(brand_dir: Path, profile: dict) -> dict:
-    seen_path = brand_dir.expanduser().resolve() / "radar_seen.json"
-    already_seen: set[str] = set()
-    if seen_path.is_file():
+    brand_dir = safe_path(brand_dir)
+    actual = profile_from_dir(brand_dir)
+    if profile.get("brand_id") != actual["brand_id"]:
+        raise ValueError("Radar brand mismatch")
+    profile = actual
+    keywords = profile.get("keyword_watch_patterns") or [profile["brand_slug"]]
+    if len(keywords) > 10:
+        raise ValueError("Limit CT scans to ten keywords per invocation")
+    rows, errors, successes = [], [], []
+    for keyword in keywords:
         try:
-            loaded = json.loads(seen_path.read_text(encoding="utf-8"))
-            if isinstance(loaded.get("seen_domains"), list):
-                already_seen = {str(d).lower() for d in loaded["seen_domains"]}
-        except json.JSONDecodeError:
-            already_seen = set()
-
-    keywords = profile.get("keyword_watch_patterns") or [profile.get("brand_slug", "")]
-    allowlist = profile.get("allowlist_domains", [])
-
-    all_rows: list[dict] = []
-    for kw in keywords:
-        kw_clean = str(kw).strip()
-        if len(kw_clean) >= 3:
-            all_rows.extend(_fetch_crt_json(kw_clean))
-
-    newly_discovered = extract_candidate_domains_from_crt(all_rows, allowlist, already_seen)
-    updated_seen = sorted(already_seen.union(newly_discovered))
-
-    _atomic_write_json(
-        seen_path,
-        {
-            "last_scanned_at": _utc_now_iso(),
-            "keywords_queried": keywords,
-            "seen_domains": updated_seen,
-        },
-    )
-
-    return {
-        "scanned_at": _utc_now_iso(),
-        "keywords_queried": keywords,
-        "new_suspicious_count": len(newly_discovered),
-        "new_suspicious_domains": newly_discovered,
-    }
+            rows.extend(_fetch_crt_json(keyword)); successes.append(keyword)
+        except (ValueError, OSError) as exc:
+            errors.append({"keyword": keyword, "error": str(exc)})
+    candidates = extract_candidate_domains_from_crt(rows, profile_allowlist(profile), set())
+    candidates = [host for host in candidates if any(k.lower() in host for k in keywords)]
+    path = brand_dir / "radar_seen.json"
+    with locked(brand_dir / ".radar.lock"):
+        state = read_json(path) if path.exists() else {"schema_version": 2, "candidates": {}}
+        if state.get("schema_version") != 2:
+            raise ValueError("Legacy radar state requires reviewed migration; refusing silent reset")
+        for host in candidates:
+            state["candidates"].setdefault(host, {"status": "PENDING_REVIEW", "first_seen_at": utc_now()})
+            state["candidates"][host]["last_seen_at"] = utc_now()
+        state.update(last_attempt_at=utc_now(), errors=errors)
+        if successes:
+            state["last_successful_query_at"] = utc_now()
+        atomic_write_json(path, state)
+        pending = sorted(host for host, item in state["candidates"].items() if item["status"] == "PENDING_REVIEW" and not is_allowlisted_url(host, profile_allowlist(profile)))
+    return {"status": "PARTIAL" if errors and successes else "FAILED" if errors else "OK", "errors": errors,
+            "successful_keywords": successes, "pending_domains": pending, "pending_count": len(pending),
+            "warning": "CT names and first-seen times are leads, not newly registered or proven infringing domains"}
 
 
-def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Proactive Certificate Transparency (crt.sh) typosquatting radar.")
-    parser.add_argument("--slug", required=True, help="Registered brand slug")
+def triage(brand_dir: Path, domain: str, decision: str, reviewer: str, rationale: str) -> dict:
+    if decision not in ("CONFIRMED_FOR_REVIEWED_CASE", "REJECTED", "AUTHORIZED") or not reviewer.strip() or not rationale.strip():
+        raise ValueError("Explicit decision, reviewer and rationale required")
+    path = safe_path(brand_dir) / "radar_seen.json"
+    with locked(brand_dir / ".radar.lock"):
+        state = read_json(path)
+        entry = state["candidates"][normalize_hostname(domain)]
+        entry.update(status=decision, reviewer=reviewer, rationale=rationale, reviewed_at=utc_now())
+        atomic_write_json(path, state)
+    return entry
+
+
+def _main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY_PATH)
+    parser.add_argument("--slug", required=True)
+    parser.add_argument("--triage-domain"); parser.add_argument("--decision"); parser.add_argument("--reviewer"); parser.add_argument("--rationale")
     args = parser.parse_args(argv)
-
-    brand_dir, profile = load_brand_profile(args.slug)
-    result = run_radar_scan(brand_dir, profile)
+    directory, profile = load_brand_profile(args.slug, args.registry)
+    result = triage(directory, args.triage_domain, args.decision or "", args.reviewer or "", args.rationale or "") if args.triage_domain else run_radar_scan(directory, profile)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    return int(result.get("status") in ("FAILED", "PARTIAL"))
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    try:
+        sys.exit(_main())
+    except (ValueError, OSError, KeyError) as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr); sys.exit(2)

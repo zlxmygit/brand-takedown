@@ -1,648 +1,403 @@
+"""Brand-bound case state with optimistic revisions and separate legal tasks."""
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import re
-import sys
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
+import sys
+import uuid
+from zoneinfo import ZoneInfo
 
-from brand_registry import (
-    is_allowlisted_url,
-    load_brand_profile,
-    normalize_hostname,
-    sanitize_http_url,
-)
+from brand_registry import (DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
+                            normalize_hostname, profile_from_dir, utc_now)
+from storage import ConflictError, atomic_write_json, locked, private_dir, read_json, safe_path
 
-CASE_STATUSES = (
-    "DISCOVERED",
-    "EVIDENCE_LOCKED",
-    "STRIKE_READY",
-    "ACTIVE_ENFORCEMENT",
-    "COUNTER_NOTICE_ALERT",
-    "TAKEN_DOWN",
-    "WATCHLIST_RESURRECTION",
-)
-
+CASE_STATUSES = ("DISCOVERED", "EVIDENCE_LOCKED", "STRIKE_READY", "ACTIVE_ENFORCEMENT", "COUNTER_NOTICE_ALERT", "TAKEN_DOWN", "WATCHLIST_RESURRECTION")
+INFRINGING_TYPES = ("COPYRIGHT_CLONE", "TRADEMARK_IMPERSONATION", "COUNTERFEIT_GOODS", "DESIGN_PATENT_COPY", "PHISHING_OR_FAKE_TRACKING")
 CHANNEL_CLASSES = ("ENFORCEMENT_SLA", "REGULATORY_FILING")
-
-CHANNEL_STATUSES = (
-    "PENDING_SUBMISSION",
-    "DRAFT_CREATED",
-    "SUBMITTED",
-    "ACKNOWLEDGED",
-    "NEED_MORE_INFO",
-    "SLA_BREACHED",
-    "ESCALATED_TIER2",
-    "ESCALATED_TIER3",
-    "RESOLVED",
-    "REJECTED",
-)
-
-ACTIVE_SLA_CHANNEL_STATUSES = (
-    "SUBMITTED",
-    "ACKNOWLEDGED",
-    "SLA_BREACHED",
-    "ESCALATED_TIER2",
-    "ESCALATED_TIER3",
-)
-
-DEFAULT_SLA_HOURS = {
-    "payment": 48,
-    "saas": 48,
-    "phishing": 48,
-    "registrar": 72,
-    "hosting": 72,
-    "cdn": 72,
-    "esp": 72,
-    "search_ads": 120,
-}
-
-ISO_FRAC_RE = re.compile(r"\.(\d+)")
-ISO_COLONLESS_TZ_RE = re.compile(r"([+-])(\d{2})(\d{2})$")
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+CHANNEL_STATUSES = ("PENDING_SUBMISSION", "DRAFT_CREATED", "SUBMITTED", "ACKNOWLEDGED", "NEED_MORE_INFO", "SLA_BREACHED", "ESCALATED_TIER2", "ESCALATED_TIER3", "RESOLVED", "REJECTED")
+ACTIVE_SLA_CHANNEL_STATUSES = ("SUBMITTED", "ACKNOWLEDGED", "NEED_MORE_INFO", "SLA_BREACHED", "ESCALATED_TIER2", "ESCALATED_TIER3")
+DEFAULT_SLA_HOURS = {"payment": 48, "saas": 48, "phishing": 48, "registrar": 72, "hosting": 72, "cdn": 72, "esp": 72, "search_ads": 120}
+_atomic_write_json = atomic_write_json
+_utc_now_iso = utc_now
 
 
 def _parse_iso_utc(value: str) -> datetime:
-    cleaned = value.strip()
-    if cleaned.endswith(("Z", "z")):
-        cleaned = cleaned[:-1] + "+00:00"
-    else:
-        cleaned = ISO_COLONLESS_TZ_RE.sub(r"\1\2:\3", cleaned)
-    cleaned = ISO_FRAC_RE.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), cleaned, count=1)
-    dt = datetime.fromisoformat(cleaned)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    value = value.strip().replace("z", "Z")
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    if parsed.tzinfo is None:
+        raise ValueError("Timestamp must include a UTC offset")
+    return parsed.astimezone(timezone.utc)
 
 
-def _format_iso_utc(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _format_iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _add_business_days(start_dt: datetime, business_days: int) -> datetime:
-    current = start_dt
-    added = 0
-    while added < business_days:
-        current += timedelta(days=1)
-        if current.weekday() < 5:
-            added += 1
-    return current
+def _add_business_days(start_dt: datetime, count: int) -> datetime:
+    # Weekend-only estimate, never a certified statutory deadline.
+    result = start_dt
+    for _ in range(count):
+        result += timedelta(days=1)
+        while result.weekday() >= 5:
+            result += timedelta(days=1)
+    return result
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp_path, path)
-
-
-def _host_to_slug(host: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")
-
-
-def _find_existing_case_for_host(cases_root: Path, host: str) -> Path | None:
-    if not cases_root.is_dir():
-        return None
-    for child in sorted(cases_root.iterdir()):
-        case_file = child / "case.json"
-        if not case_file.is_file():
-            continue
-        try:
-            data = json.loads(case_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            continue
-        if data.get("primary_domain") == host:
-            return child
-    return None
+def case_profile(case_dir: Path) -> dict:
+    case_dir = safe_path(case_dir)
+    if case_dir.parent.name != "cases":
+        raise ValueError("Case must be directly inside its brand's cases directory")
+    return profile_from_dir(case_dir.parent.parent)
 
 
 def load_case(case_dir: Path) -> dict:
-    case_file = case_dir / "case.json"
-    if not case_file.exists():
-        raise FileNotFoundError(f"case.json not found in {case_dir}")
-    return json.loads(case_file.read_text(encoding="utf-8"))
+    case_dir = safe_path(case_dir)
+    profile = case_profile(case_dir)
+    data = read_json(case_dir / "case.json")
+    if (data.get("schema_version") != 2 or data.get("brand_id") != profile["brand_id"]
+            or data.get("brand_slug") != profile["brand_slug"] or data.get("case_id") != case_dir.name):
+        raise ConflictError("Case identity mismatch or legacy schema; reviewed migration required")
+    if not isinstance(data.get("revision"), int) or data["revision"] < 0:
+        raise ValueError("Invalid case revision")
+    urls = data.get("target_urls")
+    if not isinstance(urls, list) or not urls:
+        raise ValueError("Case has no targets")
+    from brand_registry import sanitize_http_url
+    for url in urls:
+        if sanitize_http_url(url) != url or normalize_hostname(url) != data["primary_domain"]:
+            raise ConflictError("Case target identity mismatch")
+    return data
+
+
+def assert_case_brand(case_dir: Path, brand_dir: Path) -> None:
+    if safe_path(case_dir).parent != safe_path(brand_dir) / "cases":
+        raise ConflictError("--slug and --case-dir belong to different brands")
+    load_case(case_dir)
+
+
+def _persist(case_dir: Path, data: dict, event: str) -> dict:
+    data["revision"] += 1
+    data["updated_at"] = utc_now()
+    data.setdefault("history", []).append({"event": event, "timestamp": data["updated_at"], "revision": data["revision"]})
+    # The derived alert cannot be cleared by a network probe or unrelated channel action.
+    if any(task.get("status") == "OPEN" for task in data.get("counter_notices", [])):
+        data["status"] = "COUNTER_NOTICE_ALERT"
+    atomic_write_json(case_dir / "case.json", data)
+    return data
+
+
+def mutate_case(case_dir: Path, event: str, mutation) -> dict:
+    case_dir = safe_path(case_dir)
+    with locked(case_dir.parent.parent / ".brand.lock"), locked(case_dir / ".case.lock"):
+        data = load_case(case_dir)
+        mutation(data)
+        return _persist(case_dir, data, event)
 
 
 def save_case(case_dir: Path, case_data: dict) -> dict:
-    case_data["updated_at"] = _utc_now_iso()
-    _atomic_write_json(case_dir / "case.json", case_data)
-    return case_data
+    case_dir = safe_path(case_dir)
+    with locked(case_dir.parent.parent / ".brand.lock"), locked(case_dir / ".case.lock"):
+        current = load_case(case_dir)
+        if case_data.get("revision") != current["revision"]:
+            raise ConflictError("Stale revision; reload before updating")
+        for key in set(current) | set(case_data):
+            if key in ("notes", "user_tags"):
+                continue
+            if case_data.get(key) != current.get(key):
+                raise ConflictError(f"Use a dedicated operation to modify {key}")
+        return _persist(case_dir, case_data, "manual_update")
 
 
-def create_case(
-    brand_dir: Path,
-    target_url: str,
-    infringement_types: list[str],
-    allowlist_domains: list[str],
-    now_iso: str | None = None,
-) -> tuple[Path, dict]:
-    if is_allowlisted_url(target_url, allowlist_domains):
-        raise ValueError(
-            f"SAFETY ABORT: Target {target_url!r} matches brand allowlist {allowlist_domains!r}. Refusing case creation."
-        )
-    clean_url = sanitize_http_url(target_url)
-    host = normalize_hostname(clean_url)
-    if not host:
-        raise ValueError(f"Cannot extract valid hostname from {target_url!r}")
-
-    dt = _parse_iso_utc(now_iso or _utc_now_iso())
-    ts = _format_iso_utc(dt)
-    cases_root = brand_dir.expanduser().resolve() / "cases"
-    cases_root.mkdir(parents=True, exist_ok=True)
-
-    existing_dir = _find_existing_case_for_host(cases_root, host)
-    if existing_dir is not None:
-        data = load_case(existing_dir)
-        urls = data.setdefault("target_urls", [])
-        if clean_url not in urls:
-            urls.append(clean_url)
-        types = data.setdefault("infringement_types", [])
-        for itype in infringement_types:
-            if itype not in types:
-                types.append(itype)
-        data["updated_at"] = ts
-        _atomic_write_json(existing_dir / "case.json", data)
-        return existing_dir, data
-
-    case_id = f"CASE-{dt.strftime('%Y%m%d')}-{_host_to_slug(host)}"
-    case_dir = cases_root / case_id
-    (case_dir / "evidence").mkdir(parents=True, exist_ok=True)
-    (case_dir / "packets").mkdir(parents=True, exist_ok=True)
-
-    unique_types: list[str] = []
-    for itype in infringement_types:
-        if itype not in unique_types:
-            unique_types.append(itype)
-
-    case_data = {
-        "case_id": case_id,
-        "primary_domain": host,
-        "target_urls": [clean_url],
-        "status": "DISCOVERED",
-        "infringement_types": unique_types,
-        "infrastructure_baseline": {
-            "ips": [],
-            "nameservers": [],
-            "registrar": "",
-            "registrar_iana_id": "",
-            "registrar_abuse_emails": [],
-            "saas_platform": "",
-            "saas_shop_id": "",
-        },
-        "linked_payment_cloak_domains": [],
-        "channels": [],
-        "counter_notices": [],
-        "created_at": ts,
-        "updated_at": ts,
-    }
-    _atomic_write_json(case_dir / "case.json", case_data)
-    return case_dir, case_data
+def create_case(brand_dir: Path, target_url: str, infringement_types: list[str],
+                allowlist_domains: list[str] | None = None, now_iso: str | None = None) -> tuple[Path, dict]:
+    brand_dir = safe_path(brand_dir)
+    profile = profile_from_dir(brand_dir)
+    url = check_target(target_url, profile)
+    if allowlist_domains:
+        from brand_registry import is_allowlisted_url
+        if is_allowlisted_url(url, allowlist_domains):
+            raise ValueError("Target matches additional allowlist")
+    if not infringement_types or any(t not in INFRINGING_TYPES for t in infringement_types):
+        raise ValueError("Unsupported infringement type")
+    host = normalize_hostname(url)
+    timestamp = _format_iso_utc(_parse_iso_utc(now_iso or utc_now()))
+    root = private_dir(brand_dir / "cases")
+    with locked(brand_dir / ".brand.lock"):
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            if not (child / "case.json").exists():
+                raise ValueError(f"Incomplete case requires recovery review: {child.name}")
+            old = load_case(child)
+            if old["primary_domain"] == host:
+                def merge(data):
+                    if url not in data["target_urls"]:
+                        data["target_urls"].append(url)
+                    data["infringement_types"] = sorted(set(data["infringement_types"] + infringement_types))
+                return child, mutate_case(child, "target_merged", merge)
+        case_id = "CASE-" + uuid.uuid4().hex
+        case_dir = root / case_id
+        case_dir.mkdir(mode=0o700, exist_ok=False)
+        private_dir(case_dir / "evidence")
+        private_dir(case_dir / "packets")
+        data = {"schema_version": 2, "revision": 0, "brand_id": profile["brand_id"], "brand_slug": profile["brand_slug"],
+                "case_id": case_id, "primary_domain": host, "target_urls": [url], "status": "DISCOVERED",
+                "liveness_state": "UNKNOWN", "infringement_types": sorted(set(infringement_types)),
+                "infrastructure_baseline": {"ips": []}, "linked_payment_cloak_domains": [], "channels": [],
+                "counter_notices": [], "captures": [], "history": [], "created_at": timestamp, "updated_at": timestamp}
+        atomic_write_json(case_dir / "case.json", data)
+        return case_dir, data
 
 
-def _compute_channel_timestamps(
-    channel_class: str,
-    category: str,
-    status: str,
-    sla_hours: int | None,
-    submitted_at: str | None,
-    existing: dict | None,
-) -> tuple[int | None, str, str, str]:
-    prior_tier = int(existing.get("escalation_tier", 1)) if existing else 1
-    prior_status = str(existing.get("status", "")) if existing else ""
-    prior_sub = str(existing.get("submitted_at", "")).strip() if existing else ""
-    prior_due = str(existing.get("next_action_due_at", "")).strip() if existing else ""
-
-    if prior_tier >= 2 and status == "ACKNOWLEDGED" and prior_status in ("ESCALATED_TIER2", "ESCALATED_TIER3"):
-        effective_status = prior_status
-    else:
-        effective_status = status
-
-    if channel_class != "ENFORCEMENT_SLA":
-        norm_sub = _format_iso_utc(_parse_iso_utc(submitted_at)) if submitted_at else prior_sub
-        if not norm_sub and effective_status == "SUBMITTED":
-            norm_sub = _utc_now_iso()
-        return None, effective_status, norm_sub, ""
-
-    effective_sla = (
-        sla_hours
-        if sla_hours is not None
-        else (existing.get("sla_hours") if existing and existing.get("sla_hours") else DEFAULT_SLA_HOURS.get(category, 72))
-    )
-
-    if effective_status in ("RESOLVED", "REJECTED"):
-        norm_sub = _format_iso_utc(_parse_iso_utc(submitted_at)) if submitted_at else prior_sub
-        return int(effective_sla), effective_status, norm_sub, ""
-
-    if submitted_at:
-        norm_sub = _format_iso_utc(_parse_iso_utc(submitted_at))
-    elif prior_sub:
-        norm_sub = prior_sub
-    elif effective_status in ACTIVE_SLA_CHANNEL_STATUSES:
-        norm_sub = _utc_now_iso()
-    else:
-        norm_sub = ""
-
-    if prior_tier >= 2 and prior_due and not submitted_at:
-        next_due = prior_due
-    elif norm_sub and effective_status in ACTIVE_SLA_CHANNEL_STATUSES:
-        if prior_due and not submitted_at and sla_hours is None:
-            next_due = prior_due
-        else:
-            next_due = _format_iso_utc(_parse_iso_utc(norm_sub) + timedelta(hours=int(effective_sla)))
-    else:
-        next_due = ""
-
-    return int(effective_sla), effective_status, norm_sub, next_due
+def _hours(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 8760:
+        raise ValueError("Follow-up hours must be 1..8760")
+    return value
 
 
-def upsert_channel(
-    case_dir: Path,
-    channel_id: str,
-    channel_class: str,
-    category: str,
-    provider_name: str,
-    target_endpoint: str,
-    status: str = "PENDING_SUBMISSION",
-    sla_hours: int | None = None,
-    ticket_ref: str = "",
-    submitted_at: str | None = None,
-) -> dict:
-    if channel_class not in CHANNEL_CLASSES:
-        raise ValueError(f"channel_class must be one of {CHANNEL_CLASSES}, got {channel_class!r}")
-    if status not in CHANNEL_STATUSES:
-        raise ValueError(f"status must be one of {CHANNEL_STATUSES}, got {status!r}")
+def _channel(data: dict, channel_id: str) -> dict:
+    for channel in data["channels"]:
+        if channel["channel_id"] == channel_id:
+            return channel
+    raise KeyError(f"Unknown channel: {channel_id}")
 
-    data = load_case(case_dir)
-    channels: list[dict] = data.setdefault("channels", [])
-    existing: dict | None = next((c for c in channels if c.get("channel_id") == channel_id), None)
 
-    effective_sla, effective_status, norm_sub, next_due = _compute_channel_timestamps(
-        channel_class=channel_class,
-        category=category,
-        status=status,
-        sla_hours=sla_hours,
-        submitted_at=submitted_at,
-        existing=existing,
-    )
+def upsert_channel(case_dir: Path, channel_id: str, channel_class: str, category: str,
+                   provider_name: str, target_endpoint: str, status="PENDING_SUBMISSION",
+                   sla_hours=None, ticket_ref="", submitted_at=None) -> dict:
+    if channel_class not in CHANNEL_CLASSES or status not in ("PENDING_SUBMISSION", "DRAFT_CREATED") or submitted_at:
+        raise ValueError("Register a draft channel; confirm actual transmission with submit")
+    if not all(isinstance(v, str) and v.strip() for v in (channel_id, category, provider_name, target_endpoint)):
+        raise ValueError("Channel identity and endpoint are required")
+    hours = _hours(sla_hours if sla_hours is not None else DEFAULT_SLA_HOURS.get(category, 72))
+    def update(data):
+        existing = next((c for c in data["channels"] if c["channel_id"] == channel_id), None)
+        if existing and existing.get("submitted_at"):
+            raise ConflictError("Submitted channel identity is immutable; add a new channel")
+        record = {"channel_id": channel_id, "channel_class": channel_class, "category": category,
+                  "provider_name": provider_name, "target_endpoint": target_endpoint, "status": status,
+                  "ticket_ref": ticket_ref, "escalation_tier": 1, "sla_hours": hours if channel_class == "ENFORCEMENT_SLA" else None,
+                  "submitted_at": "", "next_action_due_at": "", "history": []}
+        if existing:
+            data["channels"].remove(existing)
+        data["channels"].append(record)
+    return mutate_case(case_dir, "channel_draft_registered", update)
 
-    if existing is None:
-        record = {
-            "channel_id": channel_id,
-            "channel_class": channel_class,
-            "category": category,
-            "provider_name": provider_name,
-            "target_endpoint": target_endpoint,
-            "status": effective_status,
-            "ticket_ref": ticket_ref,
-            "escalation_tier": 1,
-            "sla_hours": effective_sla,
-            "submitted_at": norm_sub,
-            "next_action_due_at": next_due,
-            "history": [],
-        }
-        channels.append(record)
-    else:
-        existing["channel_class"] = channel_class
-        existing["category"] = category
-        existing["provider_name"] = provider_name
-        existing["target_endpoint"] = target_endpoint
-        existing["status"] = effective_status
+
+def confirm_submission(case_dir: Path, channel_id: str, packet_id: str, submission_ref: str, sent_at: str) -> dict:
+    if not submission_ref.strip():
+        raise ValueError("Actual transmission receipt/reference required")
+    sent = _parse_iso_utc(sent_at)
+    if sent > datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise ValueError("Transmission timestamp is in the future")
+    def submit(data):
+        from packets import verify_approved_packet
+        channel = _channel(data, channel_id)
+        packet = verify_approved_packet(case_dir, packet_id)
+        if packet["channel_id"] != channel_id or packet["endpoint"] != channel["target_endpoint"]:
+            raise ConflictError("Approval does not match this channel")
+        if any(h.get("packet_id") == packet_id for h in channel["history"]):
+            raise ConflictError("Packet transmission already recorded")
+        if channel["status"] in ("RESOLVED", "REJECTED"):
+            raise ConflictError("Closed channel cannot be submitted")
+        pending = channel.get("pending_tier")
+        if channel["submitted_at"] and not pending:
+            raise ConflictError("Use a due escalation draft before a further transmission")
+        if pending and sent < _parse_iso_utc(channel["next_action_due_at"]):
+            raise ConflictError("Escalation transmission predates the follow-up window")
+        if sent < _parse_iso_utc(packet["approval"]["approved_at"]):
+            raise ConflictError("Transmission predates approval; review historical import separately")
+        tier = pending or 1
+        if packet["tier"] != tier:
+            raise ConflictError("Packet tier differs from planned submission")
+        if not channel["submitted_at"]:
+            channel["submitted_at"] = _format_iso_utc(sent)
+        channel["escalation_tier"] = tier
+        channel["status"] = "SUBMITTED" if tier == 1 else f"ESCALATED_TIER{tier}"
+        if channel["channel_class"] == "ENFORCEMENT_SLA":
+            hours = channel.pop("pending_hours", channel["sla_hours"])
+            channel["next_action_due_at"] = _format_iso_utc(sent + timedelta(hours=hours))
+        channel.pop("pending_tier", None)
+        channel["history"].append({"event": "transmission_recorded", "tier": tier, "packet_id": packet_id,
+                                   "submission_ref": submission_ref, "timestamp": _format_iso_utc(sent)})
+        data["status"] = "ACTIVE_ENFORCEMENT"
+    return mutate_case(case_dir, "transmission_recorded", submit)
+
+
+def update_channel_fields(case_dir: Path, channel_id: str, status=None, ticket_ref=None, submitted_at=None, sla_hours=None) -> dict:
+    if submitted_at or sla_hours is not None:
+        raise ValueError("Transmission timestamps and follow-up windows cannot be rewritten")
+    if status is not None and status not in ("ACKNOWLEDGED", "NEED_MORE_INFO", "RESOLVED", "REJECTED"):
+        raise ValueError("Invalid feedback status")
+    def update(data):
+        channel = _channel(data, channel_id)
+        if status and not channel["submitted_at"]:
+            raise ConflictError("Cannot acknowledge an unsubmitted channel")
+        if channel["status"] in ("RESOLVED", "REJECTED") and status not in (None, channel["status"]):
+            raise ConflictError("Closed channel requires a new reviewed channel")
+        if status:
+            channel["status"] = status
+            if status in ("RESOLVED", "REJECTED"):
+                channel["next_action_due_at"] = ""
+            elif status == "NEED_MORE_INFO" and channel["channel_class"] == "ENFORCEMENT_SLA":
+                channel["next_action_due_at"] = utc_now()
         if ticket_ref:
-            existing["ticket_ref"] = ticket_ref
-        existing["sla_hours"] = effective_sla
-        existing["submitted_at"] = norm_sub
-        existing["next_action_due_at"] = next_due
-
-    if effective_status in ACTIVE_SLA_CHANNEL_STATUSES and data.get("status") in (
-        "DISCOVERED",
-        "EVIDENCE_LOCKED",
-        "STRIKE_READY",
-    ):
-        data["status"] = "ACTIVE_ENFORCEMENT"
-
-    return save_case(case_dir, data)
+            channel["ticket_ref"] = ticket_ref.strip()
+        channel["history"].append({"event": "feedback", "status": channel["status"], "timestamp": utc_now()})
+    return mutate_case(case_dir, "channel_feedback", update)
 
 
-def update_channel_fields(
-    case_dir: Path,
-    channel_id: str,
-    status: str | None = None,
-    ticket_ref: str | None = None,
-    submitted_at: str | None = None,
-    sla_hours: int | None = None,
-) -> dict:
-    data = load_case(case_dir)
-    existing: dict | None = next((c for c in data.get("channels", []) if c.get("channel_id") == channel_id), None)
-    if existing is None:
-        raise KeyError(f"Channel {channel_id!r} not found in {case_dir}")
-
-    target_status = status if status is not None else existing["status"]
-    if target_status not in CHANNEL_STATUSES:
-        raise ValueError(f"Invalid channel status: {target_status!r}")
-
-    effective_sla, effective_status, norm_sub, next_due = _compute_channel_timestamps(
-        channel_class=existing["channel_class"],
-        category=existing["category"],
-        status=target_status,
-        sla_hours=sla_hours,
-        submitted_at=submitted_at,
-        existing=existing,
-    )
-    existing["status"] = effective_status
-    existing["sla_hours"] = effective_sla
-    existing["submitted_at"] = norm_sub
-    existing["next_action_due_at"] = next_due
-    if ticket_ref is not None and ticket_ref.strip():
-        existing["ticket_ref"] = ticket_ref.strip()
-
-    if effective_status in ACTIVE_SLA_CHANNEL_STATUSES and data.get("status") in (
-        "DISCOVERED",
-        "EVIDENCE_LOCKED",
-        "STRIKE_READY",
-    ):
-        data["status"] = "ACTIVE_ENFORCEMENT"
-
-    return save_case(case_dir, data)
+def add_linked_cloak_domain(case_dir: Path, cloak_domain: str, role="payment_b_site", allowlist_domains=None) -> dict:
+    profile = case_profile(case_dir)
+    url = check_target(cloak_domain if "://" in cloak_domain else "https://" + cloak_domain + "/", profile)
+    host = normalize_hostname(url)
+    def update(data):
+        if not any(item["domain"] == host for item in data["linked_payment_cloak_domains"]):
+            data["linked_payment_cloak_domains"].append({"domain": host, "role": role, "status": "UNVERIFIED_LEAD", "discovered_at": utc_now()})
+    return mutate_case(case_dir, "linked_lead_added", update)
 
 
-def add_linked_cloak_domain(
-    case_dir: Path,
-    cloak_domain: str,
-    role: str = "payment_b_site",
-    allowlist_domains: list[str] | None = None,
-) -> dict:
-    if allowlist_domains and is_allowlisted_url(cloak_domain, allowlist_domains):
-        raise ValueError(
-            f"SAFETY ABORT: Linked cloak domain {cloak_domain!r} matches brand allowlist {allowlist_domains!r}."
-        )
-    if "://" in cloak_domain:
-        sanitize_http_url(cloak_domain)
-    host = normalize_hostname(cloak_domain)
-    if not host:
-        raise ValueError(f"Invalid cloak domain: {cloak_domain!r}")
-    data = load_case(case_dir)
-    linked: list[dict] = data.setdefault("linked_payment_cloak_domains", [])
-    for entry in linked:
-        if entry.get("domain") == host:
-            return data
-    linked.append(
-        {
-            "domain": host,
-            "role": role,
-            "discovered_at": _utc_now_iso(),
-        }
-    )
-    return save_case(case_dir, data)
-
-
-def scan_due_escalations(brand_dir: Path, now_iso: str | None = None) -> list[dict]:
-    now_dt = _parse_iso_utc(now_iso or _utc_now_iso())
-    cases_root = brand_dir.expanduser().resolve() / "cases"
-    due_items: list[dict] = []
-    if not cases_root.is_dir():
-        return due_items
-
-    inactive_case_statuses = {"TAKEN_DOWN", "WATCHLIST_RESURRECTION"}
-    eligible_channel_statuses = {"SUBMITTED", "ACKNOWLEDGED", "SLA_BREACHED", "ESCALATED_TIER2"}
-
-    for child in sorted(cases_root.iterdir()):
-        case_file = child / "case.json"
-        if not case_file.is_file():
+def scan_due_escalations(brand_dir: Path, now_iso=None) -> list[dict]:
+    now = _parse_iso_utc(now_iso or utc_now())
+    items = []
+    for child in sorted((safe_path(brand_dir) / "cases").iterdir()):
+        if not child.is_dir():
             continue
-        case_data = load_case(child)
-        if case_data.get("status") in inactive_case_statuses:
-            continue
-        for ch in case_data.get("channels", []):
-            if ch.get("channel_class") != "ENFORCEMENT_SLA":
-                continue
-            if ch.get("status") not in eligible_channel_statuses:
-                continue
-            due_str = str(ch.get("next_action_due_at", "")).strip()
-            if not due_str:
-                continue
-            due_dt = _parse_iso_utc(due_str)
-            if now_dt >= due_dt:
-                tier2_ts = ""
-                for hist in ch.get("history", []):
-                    if hist.get("event") == "escalated_to_tier_2":
-                        tier2_ts = str(hist.get("timestamp", ""))
-                due_items.append(
-                    {
-                        "case_id": case_data["case_id"],
-                        "case_dir": str(child),
-                        "primary_domain": case_data["primary_domain"],
-                        "channel_id": ch["channel_id"],
-                        "provider_name": ch["provider_name"],
-                        "target_endpoint": ch["target_endpoint"],
-                        "current_tier": ch.get("escalation_tier", 1),
-                        "ticket_ref": ch.get("ticket_ref", ""),
-                        "submitted_at": ch.get("submitted_at", ""),
-                        "tier2_escalated_at": tier2_ts,
-                        "next_action_due_at": due_str,
-                    }
-                )
-    return due_items
+        try:
+            data = load_case(child)
+            for task in data["counter_notices"]:
+                if task["status"] == "OPEN":
+                    items.append({"kind": "LEGAL_REVIEW", "case_id": data["case_id"], "case_dir": str(child), "task": task})
+            for channel in data["channels"]:
+                due = channel["next_action_due_at"]
+                if (channel["channel_class"] == "ENFORCEMENT_SLA" and channel["status"] in ACTIVE_SLA_CHANNEL_STATUSES
+                        and due and now >= _parse_iso_utc(due)):
+                    kind = "SUPPLEMENT_REVIEW" if channel["status"] == "NEED_MORE_INFO" else "TIER3_REVIEW" if channel["escalation_tier"] == 3 else "FOLLOWUP_REVIEW"
+                    items.append({"kind": kind, "case_id": data["case_id"], "case_dir": str(child), **channel})
+        except (ValueError, OSError, KeyError) as exc:
+            items.append({"kind": "CASE_ERROR", "case_dir": str(child), "error": str(exc)})
+    return items
 
 
-def advance_escalation_tier(
-    case_dir: Path,
-    channel_id: str,
-    now_iso: str | None = None,
-    next_sla_hours: int = 48,
-) -> dict:
-    now_dt = _parse_iso_utc(now_iso or _utc_now_iso())
-    ts = _format_iso_utc(now_dt)
-    data = load_case(case_dir)
-    target_ch: dict | None = next((c for c in data.get("channels", []) if c.get("channel_id") == channel_id), None)
-    if target_ch is None:
-        raise KeyError(f"Channel {channel_id!r} not found in {case_dir}")
-    if target_ch.get("channel_class") != "ENFORCEMENT_SLA":
-        raise ValueError(f"Channel {channel_id!r} is {target_ch.get('channel_class')}, cannot escalate SLA")
-
-    current_tier = int(target_ch.get("escalation_tier", 1))
-    new_tier = min(current_tier + 1, 3)
-    target_ch["escalation_tier"] = new_tier
-    target_ch["status"] = "ESCALATED_TIER2" if new_tier == 2 else "ESCALATED_TIER3"
-    target_ch["next_action_due_at"] = _format_iso_utc(now_dt + timedelta(hours=next_sla_hours))
-    target_ch.setdefault("history", []).append(
-        {
-            "event": f"escalated_to_tier_{new_tier}",
-            "timestamp": ts,
-        }
-    )
-    return save_case(case_dir, data)
+def advance_escalation_tier(case_dir: Path, channel_id: str, now_iso=None, next_sla_hours=48) -> dict:
+    now = _parse_iso_utc(now_iso or utc_now())
+    hours = _hours(next_sla_hours)
+    def advance(data):
+        channel = _channel(data, channel_id)
+        if (channel["channel_class"] != "ENFORCEMENT_SLA" or channel["status"] not in ACTIVE_SLA_CHANNEL_STATUSES
+                or not channel["submitted_at"] or not channel["next_action_due_at"]):
+            raise ConflictError("Channel is not eligible for escalation")
+        if now < _parse_iso_utc(channel["next_action_due_at"]):
+            raise ConflictError("Internal follow-up window has not elapsed")
+        if channel["escalation_tier"] >= 3 or channel.get("pending_tier"):
+            raise ConflictError("No further automatic tier; review pending draft or Tier 3")
+        channel["pending_tier"] = channel["escalation_tier"] + 1
+        channel["pending_hours"] = hours
+        # Planning a draft is not an actual transmission and must not reset deadlines.
+    return mutate_case(case_dir, "escalation_draft_planned", advance)
 
 
-def record_counter_notice(
-    case_dir: Path,
-    channel_id: str,
-    received_at_iso: str,
-    summary: str,
-) -> dict:
-    recv_dt = _parse_iso_utc(received_at_iso)
-    deadline_dt = _add_business_days(recv_dt, 10)
-    data = load_case(case_dir)
-    data["status"] = "COUNTER_NOTICE_ALERT"
-    data.setdefault("counter_notices", []).append(
-        {
-            "channel_id": channel_id,
-            "received_at_iso": _format_iso_utc(recv_dt),
-            "legal_action_deadline_iso": _format_iso_utc(deadline_dt),
-            "summary": summary,
-            "recommended_actions": [
-                "Verify physical address and federal court jurisdiction consent in counter-notice for perjury/bad-faith.",
-                "Pivot immediately to non-DMCA lanes: Registered Trademark Counterfeit, Design Patent, and Payment Processor Fraud.",
-            ],
-        }
-    )
-    return save_case(case_dir, data)
+def record_counter_notice(case_dir: Path, channel_id: str, received_at_iso: str, summary: str,
+                          provider_received_at=None, provider_timezone="UTC", source_ref="") -> dict:
+    received = _parse_iso_utc(received_at_iso)
+    if not summary.strip() or not source_ref.strip():
+        raise ValueError("Counter-notice summary and source message reference required")
+    estimates = {}
+    if provider_received_at:
+        local = _parse_iso_utc(provider_received_at).astimezone(ZoneInfo(provider_timezone))
+        estimates = {"earliest_restore_estimate": _format_iso_utc(_add_business_days(local, 10)),
+                     "latest_restore_estimate": _format_iso_utc(_add_business_days(local, 14))}
+    def record(data):
+        _channel(data, channel_id)
+        if any(t["source_ref"] == source_ref for t in data["counter_notices"]):
+            return
+        data["counter_notices"].append({"task_id": uuid.uuid4().hex, "status": "OPEN", "channel_id": channel_id,
+            "received_by_rightsholder_at": _format_iso_utc(received), "provider_received_at": provider_received_at,
+            "provider_timezone": provider_timezone, "source_ref": source_ref, "summary": summary,
+            "review_due_at": utc_now(), "calendar_basis": "WEEKDAYS_ONLY_ESTIMATE_NOT_LEGAL_DEADLINE",
+            "requires_counsel_confirmation": True, **estimates})
+    return mutate_case(case_dir, "counter_notice_recorded", record)
 
 
-def _main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Persistent takedown case & SLA state machine.")
+def resolve_legal_task(case_dir: Path, task_id: str, reviewer: str, disposition: str) -> dict:
+    if not reviewer.strip() or not disposition.strip():
+        raise ValueError("Named reviewer and documented disposition required")
+    def resolve(data):
+        task = next((t for t in data["counter_notices"] if t["task_id"] == task_id), None)
+        if task is None:
+            raise KeyError(task_id)
+        task.update(status="REVIEWED", reviewer=reviewer, disposition=disposition, reviewed_at=utc_now())
+        if not any(t["status"] == "OPEN" for t in data["counter_notices"]):
+            data["status"] = "ACTIVE_ENFORCEMENT"
+    return mutate_case(case_dir, "legal_task_reviewed", resolve)
+
+
+def _main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY_PATH)
     sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p_create = sub.add_parser("create", help="Create or merge an infringement case for a brand")
-    p_create.add_argument("--slug", required=True)
-    p_create.add_argument("--url", required=True)
-    p_create.add_argument("--types", nargs="+", required=True)
-
-    p_ch = sub.add_parser("add-channel", help="Add or replace a takedown channel on a case")
-    p_ch.add_argument("--case-dir", type=Path, required=True)
-    p_ch.add_argument("--channel-id", required=True)
-    p_ch.add_argument("--channel-class", choices=CHANNEL_CLASSES, required=True)
-    p_ch.add_argument("--category", required=True)
-    p_ch.add_argument("--provider", required=True)
-    p_ch.add_argument("--endpoint", required=True)
-    p_ch.add_argument("--status", choices=CHANNEL_STATUSES, default="PENDING_SUBMISSION")
-    p_ch.add_argument("--sla-hours", type=int, default=None)
-    p_ch.add_argument("--ticket-ref", default="")
-    p_ch.add_argument("--submitted-at", default=None)
-
-    p_upd = sub.add_parser("update-channel", help="Update status or ticket reference of an existing channel")
-    p_upd.add_argument("--case-dir", type=Path, required=True)
-    p_upd.add_argument("--channel-id", required=True)
-    p_upd.add_argument("--status", choices=CHANNEL_STATUSES, default=None)
-    p_upd.add_argument("--ticket-ref", default=None)
-    p_upd.add_argument("--submitted-at", default=None)
-    p_upd.add_argument("--sla-hours", type=int, default=None)
-
-    p_esc = sub.add_parser("escalate", help="Advance an overdue ENFORCEMENT_SLA channel to next tier")
-    p_esc.add_argument("--case-dir", type=Path, required=True)
-    p_esc.add_argument("--channel-id", required=True)
-    p_esc.add_argument("--next-sla-hours", type=int, default=48)
-
-    p_cloak = sub.add_parser("add-cloak", help="Link a payment B-site / cloak domain discovered during checkout probe")
-    p_cloak.add_argument("--slug", default=None, help="Optional brand slug to enforce allowlist guard")
-    p_cloak.add_argument("--case-dir", type=Path, required=True)
-    p_cloak.add_argument("--domain", required=True)
-    p_cloak.add_argument("--role", default="payment_b_site")
-
-    p_cn = sub.add_parser("counter-notice", help="Record a P0 DMCA counter-notice and compute 10-business-day deadline")
-    p_cn.add_argument("--case-dir", type=Path, required=True)
-    p_cn.add_argument("--channel-id", required=True)
-    p_cn.add_argument("--received-at", required=True)
-    p_cn.add_argument("--summary", required=True)
-
-    p_due = sub.add_parser("due", help="List all SLA-breached channels requiring chaser or upstream escalation")
-    p_due.add_argument("--slug", required=True)
-
-    p_sum = sub.add_parser("summary", help="Print status summary of all cases for a brand")
-    p_sum.add_argument("--slug", required=True)
-
+    create = sub.add_parser("create")
+    create.add_argument("--slug", required=True)
+    create.add_argument("--url", required=True)
+    create.add_argument("--types", nargs="+", choices=INFRINGING_TYPES, required=True)
+    for name in ("due", "summary"):
+        p = sub.add_parser(name); p.add_argument("--slug", required=True)
+    for name in ("add-channel", "update-channel", "escalate", "add-cloak", "counter-notice", "submit", "resolve-legal"):
+        p = sub.add_parser(name)
+        p.add_argument("--slug", required=True)
+        p.add_argument("--case-dir", type=Path, required=True)
+        if name not in ("add-cloak", "resolve-legal"):
+            p.add_argument("--channel-id", required=True)
+        if name == "add-channel":
+            p.add_argument("--channel-class", choices=CHANNEL_CLASSES, required=True)
+            p.add_argument("--category", required=True); p.add_argument("--provider", required=True); p.add_argument("--endpoint", required=True)
+        elif name == "update-channel":
+            p.add_argument("--status"); p.add_argument("--ticket-ref")
+        elif name == "add-cloak":
+            p.add_argument("--domain", required=True)
+        elif name == "counter-notice":
+            for field in ("received-at", "summary", "source-ref"):
+                p.add_argument("--" + field, required=True)
+            p.add_argument("--provider-received-at"); p.add_argument("--provider-timezone", default="UTC")
+        elif name == "submit":
+            for field in ("packet-id", "submission-ref", "sent-at"):
+                p.add_argument("--" + field, required=True)
+        elif name == "resolve-legal":
+            for field in ("task-id", "reviewer", "disposition"):
+                p.add_argument("--" + field, required=True)
     args = parser.parse_args(argv)
-
+    brand_dir, profile = load_brand_profile(args.slug, args.registry)
+    if hasattr(args, "case_dir"):
+        assert_case_brand(args.case_dir, brand_dir)
     if args.cmd == "create":
-        brand_dir, prof = load_brand_profile(args.slug)
-        cdir, cdata = create_case(brand_dir, args.url, args.types, prof.get("allowlist_domains", []))
-        print(json.dumps({"case_dir": str(cdir), "case": cdata}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "add-channel":
-        updated = upsert_channel(
-            args.case_dir,
-            channel_id=args.channel_id,
-            channel_class=args.channel_class,
-            category=args.category,
-            provider_name=args.provider,
-            target_endpoint=args.endpoint,
-            status=args.status,
-            sla_hours=args.sla_hours,
-            ticket_ref=args.ticket_ref,
-            submitted_at=args.submitted_at,
-        )
-        print(json.dumps(updated, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "update-channel":
-        updated = update_channel_fields(
-            args.case_dir,
-            channel_id=args.channel_id,
-            status=args.status,
-            ticket_ref=args.ticket_ref,
-            submitted_at=args.submitted_at,
-            sla_hours=args.sla_hours,
-        )
-        print(json.dumps(updated, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "escalate":
-        updated = advance_escalation_tier(args.case_dir, args.channel_id, next_sla_hours=args.next_sla_hours)
-        print(json.dumps(updated, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "add-cloak":
-        allow: list[str] | None = None
-        if args.slug:
-            _, prof = load_brand_profile(args.slug)
-            allow = prof.get("allowlist_domains", [])
-        elif args.case_dir.expanduser().resolve().parent.parent.joinpath("profile.json").is_file():
-            p_json = json.loads(
-                args.case_dir.expanduser().resolve().parent.parent.joinpath("profile.json").read_text(encoding="utf-8")
-            )
-            allow = p_json.get("allowlist_domains", [])
-        updated = add_linked_cloak_domain(args.case_dir, args.domain, role=args.role, allowlist_domains=allow)
-        print(json.dumps(updated, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "counter-notice":
-        updated = record_counter_notice(args.case_dir, args.channel_id, args.received_at, args.summary)
-        print(json.dumps(updated, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "due":
-        brand_dir, _ = load_brand_profile(args.slug)
-        due = scan_due_escalations(brand_dir)
-        print(json.dumps({"due_count": len(due), "due_channels": due}, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.cmd == "summary":
-        brand_dir, _ = load_brand_profile(args.slug)
-        cases_root = brand_dir / "cases"
-        rows = []
-        if cases_root.is_dir():
-            for child in sorted(cases_root.iterdir()):
-                if (child / "case.json").is_file():
-                    d = load_case(child)
-                    rows.append(
-                        {
-                            "case_id": d["case_id"],
-                            "primary_domain": d["primary_domain"],
-                            "status": d["status"],
-                            "channel_count": len(d.get("channels", [])),
-                            "counter_notices": len(d.get("counter_notices", [])),
-                        }
-                    )
-        print(json.dumps({"total_cases": len(rows), "cases": rows}, ensure_ascii=False, indent=2))
-        return 0
-
-    return 1
+        path, data = create_case(brand_dir, args.url, args.types)
+        result = {"case_dir": str(path), "case": data}
+    elif args.cmd == "due":
+        result = {"items": scan_due_escalations(brand_dir)}
+    elif args.cmd == "summary":
+        result = {"cases": [load_case(c) for c in sorted((brand_dir / "cases").iterdir()) if c.is_dir()]}
+    elif args.cmd == "add-channel":
+        result = upsert_channel(args.case_dir, args.channel_id, args.channel_class, args.category, args.provider, args.endpoint)
+    elif args.cmd == "update-channel":
+        result = update_channel_fields(args.case_dir, args.channel_id, args.status, args.ticket_ref)
+    elif args.cmd == "escalate":
+        result = advance_escalation_tier(args.case_dir, args.channel_id)
+    elif args.cmd == "add-cloak":
+        result = add_linked_cloak_domain(args.case_dir, args.domain)
+    elif args.cmd == "counter-notice":
+        result = record_counter_notice(args.case_dir, args.channel_id, args.received_at, args.summary, args.provider_received_at, args.provider_timezone, args.source_ref)
+    elif args.cmd == "resolve-legal":
+        result = resolve_legal_task(args.case_dir, args.task_id, args.reviewer, args.disposition)
+    else:
+        result = confirm_submission(args.case_dir, args.channel_id, args.packet_id, args.submission_ref, args.sent_at)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return int(any(i.get("kind") == "CASE_ERROR" for i in result.get("items", [])))
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    try:
+        sys.exit(_main())
+    except (ValueError, OSError, KeyError) as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr); sys.exit(2)

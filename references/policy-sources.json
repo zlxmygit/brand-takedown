@@ -1,0 +1,94 @@
+{
+  "checked_on": "2026-11-12",
+  "scope": "Workflow corrections only; recheck before use; not jurisdiction-complete legal advice",
+  "sources": [
+    {
+      "id": "S1",
+      "title": "US Copyright Office：Section512通知/反通知与避风港FAQ",
+      "url": "https://www.copyright.gov/512/",
+      "scope": "10–14工作日恢复窗口、准确通知、避风港条件；本报告仅作流程纠错，不替代执业律师意见。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S2",
+      "title": "17 USC §512 法条",
+      "url": "https://www.copyright.gov/title17/92chap5.html",
+      "scope": "§512(g)(2)(C)从服务商收到反通知起算；与已提起寻求限制侵权的法院程序之通知相关。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S3",
+      "title": "Shopify copyright policy",
+      "url": "https://help.shopify.com/en/manual/compliance/intellectual-property/copyright-policy",
+      "scope": "通知商家；投诉副本可能包含联系方式；具体URL要求。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S4",
+      "title": "Shopify trademark/trade dress policy",
+      "url": "https://help.shopify.com/en/manual/compliance/intellectual-property/trademark-trade-dress-policy",
+      "scope": "合格商标回应后通常允许重新发布，非永久封停保证。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S5",
+      "title": "ICANN RDAP",
+      "url": "https://www.icann.org/en/contracted-parties/registry-operators/resources/registration-data-access-protocol",
+      "scope": "2025-01-28起多数gTLD不再有WHOIS强制义务；仍有例外，不代表所有WHOIS关闭。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S6",
+      "title": "ICANN DNS Abuse obligations advisory",
+      "url": "https://www.icann.org/en/contracted-parties/advisories/documents/advisory-compliance-with-dns-abuse-obligations-in-the-registrar-accreditation-agreement-and-the-registry-agreement-05-02-2024-en",
+      "scope": "DNS abuse定义、适当及时缓解、比例原则和非统一固定时限。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S7",
+      "title": "DSA Regulation2022/2065 官方文本",
+      "url": "https://eur-lex.europa.eu/eli/reg/2022/2065/oj/eng",
+      "scope": "Article16/17/53；部分EUR-Lex页面有访问验证，本轮使用官方索引返回的相应条文文本核验，并未分析法律PDF。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S8",
+      "title": "NIS2 Directive2022/2555 官方文本",
+      "url": "https://eur-lex.europa.eu/eli/dir/2022/2555/oj/eng",
+      "scope": "Article28(5)合法充分理由请求、数据保护与72h回复；国家实施及个案资格另核验。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S9",
+      "title": "European Commission：CE marking",
+      "url": "https://single-market-economy.ec.europa.eu/single-market/goods/ce-marking_en",
+      "scope": "CE并非所有产品通用的政府安全认证。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S10",
+      "title": "European Commission：Defend your rights / customs AFA",
+      "url": "https://taxation-customs.ec.europa.eu/customs/prohibitions-restrictions/counterfeit-piracy-other-ipr-violations/defend-your-rights_en",
+      "scope": "eAFA、national/Union application与主管海关，不等于自动全欧执法。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S11",
+      "title": "GPSR Regulation2023/988 官方文本",
+      "url": "https://eur-lex.europa.eu/eli/reg/2023/988",
+      "scope": "Article19远程销售展示信息；适用品类与专门法重叠应分别判断。",
+      "checked_on": "2026-11-12",
+      "verification_method": "official primary page or indexed official text; no live submission"
+    }
+  ]
+}

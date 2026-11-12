@@ -1,175 +1,107 @@
-from __future__ import annotations
-
+"""Artifact and documentation invariants, not word-count-based legal validation."""
+import ast
+import hashlib
 import json
-import re
-import sys
-import unittest
 from pathlib import Path
+import re
+import shutil
+import tempfile
+import unittest
+import zipfile
+import uuid
 
-SKILL_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from brand_registry import validate_profile  # noqa: E402
+from common import ROOT, br
+from package_skill import FILES, build_package
+from doctor import diagnose
 
 
 class TestSkillIntegrity(unittest.TestCase):
-    def test_non_test_assets_are_100_percent_brand_and_host_agnostic(self) -> None:
-        host_path_re = re.compile(
-            r"(?:^|[\s\"'`=(]|file://)(?:/users/|/home/|c:\\users\\)[a-z0-9]",
-            re.IGNORECASE,
-        )
-        for subdir in ("scripts", "references", "templates", "examples"):
-            dir_path = SKILL_ROOT / subdir
-            if not dir_path.exists():
-                continue
-            for path in dir_path.iterdir():
-                if path.is_file():
-                    text = path.read_text(encoding="utf-8")
-                    self.assertIsNone(
-                        host_path_re.search(text),
-                        f"Host-specific filesystem path leaked in {path}",
-                    )
+    def test_package_files_exist_and_are_unique(self):
+        self.assertEqual(len(FILES), len(set(FILES)))
+        for name in FILES:
+            self.assertTrue((ROOT / name).is_file(), name)
 
-        for doc_name in (
-            "SKILL.md",
-            "README.md",
-            "LICENSE",
-            "SECURITY.md",
-            "CONTRIBUTING.md",
-            "CODE_OF_CONDUCT.md",
-            "CHANGELOG.md",
-        ):
-            doc_path = SKILL_ROOT / doc_name
-            if doc_path.is_file():
-                doc_text = doc_path.read_text(encoding="utf-8")
-                self.assertIsNone(
-                    host_path_re.search(doc_text),
-                    f"Host-specific filesystem path leaked in {doc_name}",
-                )
+    def test_skill_budget_and_links(self):
+        text = (ROOT / "SKILL.md").read_text()
+        self.assertTrue(text.startswith("---\nname: brand-takedown\n"))
+        self.assertLessEqual(len(text.splitlines()), 250)
+        for link in re.findall(r"\]\(([^)#]+)\)", text):
+            if "://" not in link:
+                self.assertTrue((ROOT / link).is_file(), link)
 
-    def test_community_governance_files_and_sample_profile_are_valid(self) -> None:
-        required_files = (
-            "LICENSE",
-            "SECURITY.md",
-            "CONTRIBUTING.md",
-            "CODE_OF_CONDUCT.md",
-            "CHANGELOG.md",
-            ".github/workflows/ci.yml",
-            ".github/PULL_REQUEST_TEMPLATE.md",
-            ".github/ISSUE_TEMPLATE/config.yml",
-            ".github/ISSUE_TEMPLATE/bug_report.yml",
-            ".github/ISSUE_TEMPLATE/channel_or_jurisdiction.yml",
-            "examples/sample-profile.json",
-        )
-        for rel in required_files:
-            full = SKILL_ROOT / rel
-            self.assertTrue(full.is_file(), f"Missing repository governance file: {rel}")
+    def test_all_local_markdown_links_resolve(self):
+        for path in ROOT.rglob("*.md"):
+            for link in re.findall(r"\]\(([^)#]+)\)", path.read_text()):
+                if "://" not in link and not link.startswith("mailto:"):
+                    self.assertTrue((path.parent / link).exists(), (path, link))
 
-        sample_data = json.loads((SKILL_ROOT / "examples" / "sample-profile.json").read_text(encoding="utf-8"))
-        self.assertEqual(validate_profile(sample_data), [])
+    def test_schema_keywords_are_implemented(self):
+        schema = json.loads((ROOT / "templates/profile.schema.json").read_text())
+        supported = {"$schema", "title", "description", "type", "required", "properties", "additionalProperties", "items",
+                     "enum", "minLength", "maxLength", "minItems", "uniqueItems", "pattern", "format", "minimum", "maximum"}
+        def visit(node):
+            self.assertFalse(set(node) - supported, set(node) - supported)
+            for item in node.get("properties", {}).values(): visit(item)
+            if "items" in node: visit(node["items"])
+        visit(schema)
 
-    def test_references_exist_and_cover_core_jurisdictions_and_customs(self) -> None:
-        expected_refs = {
-            "channel-playbook.md": ["Shopify", "Stripe", "PayPal", "Safe Browsing", "ClientHold", "Cloudflare"],
-            "legal-jurisdictions.md": [
-                "17 U.S.C. § 512",
-                "15 U.S.C. § 1114",
-                "15 U.S.C. § 1125(a)",
-                "Regulation (EU) 2022/2065",
-                "Article 16",
-                "Passing Off",
-            ],
-            "customs-and-safety.md": [
-                "CBP",
-                "e-Allegations",
-                "EUIPO",
-                "HMRC",
-                "GACC",
-                "Regulation (EU) 2023/988",
-                "CPSC",
-            ],
-            "escalation-and-counter-notice.md": [
-                "ICANN",
-                "NIS2",
-                "UDRP",
-                "URS",
-                "Counter-Notice",
-            ],
-        }
+    def test_generic_example_matches_runtime_schema(self):
+        value = json.loads((ROOT / "examples/sample-profile.json").read_text())
+        self.assertEqual(br.validate_profile(value), [])
+        for domain in value["official_domains"] + value.get("allowlist_domains", []):
+            self.assertTrue(domain.endswith(".example"))
 
-        for filename, required_terms in expected_refs.items():
-            path = SKILL_ROOT / "references" / filename
-            self.assertTrue(path.is_file(), f"Missing reference file: {path}")
-            content = path.read_text(encoding="utf-8")
-            self.assertGreater(len(content), 600, f"Reference file unexpectedly short: {filename}")
-            self.assertNotIn("TODO:", content)
-            for term in required_terms:
-                self.assertIn(term, content, f"Missing term {term!r} in {filename}")
-            for block in re.findall(r"```text\n(.*?)```", content, flags=re.DOTALL):
-                self.assertIsNone(
-                    re.search(r"[\u4e00-\u9fff]", block),
-                    f"Non-English CJK characters leaked inside English legal code block in {filename}",
-                )
+    def test_all_audit_ids_have_unique_ledger_rows(self):
+        text = (ROOT / "docs/audit-remediation.md").read_text()
+        ids = re.findall(r"^\|(BT-\d\d)\|", text, re.M)
+        self.assertEqual(ids, [f"BT-{i:02d}" for i in range(1, 40)])
+        self.assertIn("Partial", text); self.assertIn("Restricted", text)
 
-    def test_notice_templates_exist_and_have_no_typos_or_forced_dmca(self) -> None:
-        expected_templates = {
-            "notices-saas-payment-phishing.md": [
-                "Stripe",
-                "PayPal",
-                "Shopify",
-                "perjury",
-                "Safe Browsing",
-                "COPYRIGHT_CLONE",
-            ],
-            "notices-registrar-hosting-cdn.md": [
-                "17 U.S.C. § 512",
-                "Regulation (EU) 2022/2065",
-                "Article 16",
-                "NIS2",
-                "clientHold",
-                "telephone",
-                "COPYRIGHT_CLONE",
-            ],
-            "notices-escalation-chaser.md": [
-                "Safe Harbor",
-                "ICANN",
-                "RAA",
-                "Digital Services Coordinator",
-            ],
-        }
+    def test_unsafe_guarantees_removed_from_active_guidance(self):
+        for relative in ("SKILL.md", "references/channel-playbook.md", "references/escalation-and-counter-notice.md", "templates/notices-escalation-chaser.md"):
+            text = (ROOT / relative).read_text()
+            for phrase in ("permanently welded", "indisputable actual knowledge", "95%", "100% 缺失", "永久焊死", "直接触发共同侵权"):
+                self.assertNotIn(phrase, text)
 
-        for filename, required_terms in expected_templates.items():
-            path = SKILL_ROOT / "templates" / filename
-            self.assertTrue(path.is_file(), f"Missing template file: {path}")
-            content = path.read_text(encoding="utf-8")
-            self.assertNotIn("teléfono", content, f"Spanish typo found in {filename}")
-            self.assertNotIn("TODO:", content)
-            for term in required_terms:
-                self.assertIn(term, content, f"Missing term {term!r} in {filename}")
-            for block in re.findall(r"```text\n(.*?)```", content, flags=re.DOTALL):
-                self.assertIsNone(
-                    re.search(r"[\u4e00-\u9fff]", block),
-                    f"Non-English CJK characters leaked inside English legal code block in {filename}",
-                )
+    def test_runtime_python_imports_are_standard_library_or_local(self):
+        import sys
+        local = {p.stem for p in (ROOT / "scripts").glob("*.py")}
+        for path in (ROOT / "scripts").glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
+                for name in names:
+                    self.assertIn(name.split(".")[0], sys.stdlib_module_names | local, (path, name))
 
-    def test_skill_md_frontmatter_line_budget_and_relative_links(self) -> None:
-        skill_md = SKILL_ROOT / "SKILL.md"
-        self.assertTrue(skill_md.is_file(), "Missing top-level SKILL.md")
-        text = skill_md.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        self.assertLessEqual(len(lines), 250, f"SKILL.md exceeds 250-line budget ({len(lines)} lines)")
-        self.assertTrue(text.startswith("---\n"), "SKILL.md must begin with YAML frontmatter")
-        self.assertIn("name: brand-takedown", text[:400])
-        self.assertIn("update-channel", text)
+    def test_no_shell_true_or_embedded_sender_credentials(self):
+        for path in (ROOT / "scripts").glob("*.py"):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.keyword) and node.arg == "shell":
+                    self.assertFalse(isinstance(node.value, ast.Constant) and node.value.value is True)
+            self.assertNotIn("SMTP_PASSWORD", path.read_text())
 
-        rel_links = re.findall(r"\]\((\./[^)#]+)\)", text)
-        self.assertGreaterEqual(len(rel_links), 10, "SKILL.md should link to scripts, references, and templates")
-        for rel in rel_links:
-            resolved = (SKILL_ROOT / rel).resolve()
-            self.assertTrue(resolved.exists(), f"Broken relative link in SKILL.md: {rel} -> {resolved}")
+    def test_reproducible_package_excludes_unlisted_private_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary); copy = temporary / "skill"
+            for name in FILES:
+                target = copy / name; target.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(ROOT / name, target)
+            marker = uuid.uuid4().hex
+            (copy / "profile.json").write_text(json.dumps({"private": marker}))
+            (copy / ".env").write_text(marker)
+            (copy / "cases").mkdir(); (copy / "cases" / "notice.eml").write_text(marker)
+            one, two = temporary / "one.zip", temporary / "two.zip"
+            self.assertEqual(build_package(one, copy), build_package(two, copy))
+            with zipfile.ZipFile(one) as archive:
+                self.assertEqual(set(archive.namelist()), {"brand-takedown/" + p for p in FILES} | {"brand-takedown/SHA256SUMS.txt"})
+                for name in archive.namelist(): self.assertNotIn(marker.encode(), archive.read(name))
+                for line in archive.read("brand-takedown/SHA256SUMS.txt").decode().splitlines():
+                    digest, name = line.split("  ", 1)
+                    self.assertEqual(digest, hashlib.sha256(archive.read("brand-takedown/" + name)).hexdigest())
 
+    def test_package_refuses_output_inside_source(self):
+        with self.assertRaises(ValueError): build_package(ROOT / "unsafe.zip")
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_policy_sources_have_scope_and_provenance(self):
+        data = json.loads((ROOT / "references/policy-sources.json").read_text())
+        self.assertIn("2026-11-12", json.dumps(data))
+        self.assertGreaterEqual(len(data["sources"]), 8)
