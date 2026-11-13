@@ -19,10 +19,6 @@ SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 VALID_MARKETS = {"US", "CA", "EU", "UK", "AU", "CN_EXPORT", "GLOBAL"}
-COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES = {
-    "co.uk", "org.uk", "me.uk", "com.au", "net.au", "org.au",
-    "com.cn", "net.cn", "org.cn", "com.br", "com.hk", "co.jp",
-}
 _atomic_write_json = atomic_write_json
 
 

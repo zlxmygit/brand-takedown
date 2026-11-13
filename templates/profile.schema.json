@@ -325,6 +325,10 @@
         ],
         "additionalProperties": false
       }
+    },
+    "require_evidence_hmac": {
+      "type": "boolean",
+      "description": "Require HMAC for capture creation, packet review, email export and submission recording."
     }
   },
   "required": [

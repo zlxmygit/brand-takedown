@@ -72,7 +72,11 @@ def _build_approved_eml(case_dir: Path, packet_id: str, output_path: Path) -> Pa
     packet = verify_approved_packet(case_dir, packet_id)
     profile = case_profile(case_dir)
     sender = validate_address(packet["from_addr"])
-    if not is_allowlisted_url(sender.split("@", 1)[1], profile["official_domains"]):
+    mode = packet.get("signatory_mode")
+    configured = profile.get("public_filing_agent") if mode == "PUBLIC_FILING_AGENT" else profile["authorized_signatory"]
+    if mode not in ("PUBLIC_FILING_AGENT", "PRIMARY_SIGNATORY") or not configured or sender != validate_address(configured["legal_email"]):
+        raise ValueError("Sender differs from the approved configured signatory")
+    if mode == "PRIMARY_SIGNATORY" and not is_allowlisted_url(sender.split("@", 1)[1], profile["official_domains"]):
         raise ValueError("Sender is not on an official brand domain")
     endpoint = validate_address(packet["endpoint"])
     directory = _packet_path(case_dir, packet_id)

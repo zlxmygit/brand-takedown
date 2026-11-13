@@ -3,15 +3,22 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+from collections import deque
+import hashlib
 import json
 from pathlib import Path
 import sys
 from urllib.parse import quote
 
-from brand_registry import (COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES, DEFAULT_REGISTRY_PATH, is_allowlisted_url,
+from brand_registry import (DEFAULT_REGISTRY_PATH, is_allowlisted_url,
                             load_brand_profile, normalize_hostname, profile_allowlist, profile_from_dir, utc_now)
 from safe_http import fetch
+from domain_names import registrable_domain
+from dns_json import dns_answers
 from storage import atomic_write_json, locked, read_json, safe_path
+
+MAX_RADAR_CANDIDATES = 10000
+MAX_NEW_PER_SCAN = 2000
 
 COMMON_LOOKALIKE_TLDS = ("com", "shop", "store", "net", "org", "co")
 HOMOGLYPH_SUBS = {"o": "0", "l": "1", "i": "1", "e": "3", "a": "4", "s": "5", "m": "rn", "w": "vv"}
@@ -19,14 +26,10 @@ COMBO_PREFIXES = ("shop", "official", "buy", "support")
 COMBO_SUFFIXES = ("shop", "store", "official", "outlet", "support")
 
 
+
 def _split_domain_label_and_suffix(domain: str) -> tuple[str, str]:
-    clean = normalize_hostname(domain)
-    if not clean or "." not in clean:
-        return "", ""
-    labels = clean.split(".")
-    if len(labels) >= 3 and ".".join(labels[-2:]) in COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES:
-        return labels[-3], ".".join(labels[-2:])
-    return labels[-2], labels[-1]
+    registered = registrable_domain(domain)
+    return tuple(registered.split(".", 1)) if registered else ("", "")
 
 
 def _label_permutations(label: str) -> list[tuple[str, str]]:
@@ -59,30 +62,48 @@ def _label_permutations(label: str) -> list[tuple[str, str]]:
     return out
 
 
+
 def generate_lookalike_domains(official_domains: list[str], allowlist_domains: list[str], *,
-                               extra_tlds: tuple[str, ...] = (), max_variants: int = 60) -> list[dict]:
-    """Build bounded offline lookalike domain candidates excluded from the brand allowlist."""
+                               extra_tlds: tuple[str, ...] = (), max_variants: int = 60,
+                               offset: int = 0) -> list[dict]:
+    """Interleave source domains and mutation types; offset rotates across scans."""
     if max_variants < 1:
         return []
-    candidates: list[dict] = []
-    seen: set[str] = set()
+    if len(official_domains) > 50 or len(extra_tlds) > 10:
+        raise ValueError("Lookalike generation supports up to 50 source domains and ten extra suffixes")
+    by_source = []
+    seen_sources = set()
     for raw in official_domains:
-        label, base_tld = _split_domain_label_and_suffix(raw)
-        if not label or not base_tld:
+        label, suffix = _split_domain_label_and_suffix(raw)
+        if not label or (label, suffix) in seen_sources:
             continue
-        tlds = ("example",) + tuple(extra_tlds) if base_tld == "example" else tuple(
-            dict.fromkeys((base_tld,) + COMMON_LOOKALIKE_TLDS + tuple(extra_tlds))
-        )
+        seen_sources.add((label, suffix))
+        tlds = tuple(dict.fromkeys((suffix,) + (() if suffix == "example" else COMMON_LOOKALIKE_TLDS) + tuple(extra_tlds)))
+        groups = {}
         for mutated, kind in _label_permutations(label):
+            groups.setdefault(kind, deque())
             for tld in tlds:
                 host = normalize_hostname(f"{mutated}.{tld}")
-                if not host or host in seen or is_allowlisted_url(host, allowlist_domains):
-                    continue
-                seen.add(host)
-                candidates.append({"domain": host, "mutation_kind": kind, "source_domain": normalize_hostname(raw)})
-                if len(candidates) >= max_variants:
-                    return candidates
-    return candidates
+                if host and not is_allowlisted_url(host, allowlist_domains):
+                    groups[kind].append({"domain": host, "mutation_kind": kind, "source_domain": normalize_hostname(raw)})
+        by_source.append(groups)
+    # Kind-major interleaving covers every source before revisiting one source.
+    kinds = list(dict.fromkeys(kind for groups in by_source for kind in groups))
+    queues = deque(groups[kind] for kind in kinds for groups in by_source if groups.get(kind))
+    pool, seen = [], set()
+    while queues:
+        group = queues.popleft()
+        item = group.popleft()
+        if item["domain"] not in seen:
+            seen.add(item["domain"])
+            pool.append(item)
+        if group:
+            queues.append(group)
+    if not pool:
+        return []
+    offset %= len(pool)
+    return [pool[(offset + i) % len(pool)] for i in range(min(max_variants, len(pool)))]
+
 
 
 def _query_doh_rr(domain: str, rrtype: str) -> list[str]:
@@ -90,26 +111,26 @@ def _query_doh_rr(domain: str, rrtype: str) -> list[str]:
     response = fetch(f"https://dns.google/resolve?name={quote(domain, safe='')}&type={rrtype}", max_bytes=65536)
     if response.status != 200:
         raise ValueError(f"DoH {rrtype} HTTP {response.status}")
-    payload = json.loads(response.body)
-    if not isinstance(payload, dict):
-        raise ValueError(f"Invalid DoH {rrtype} response")
-    values: list[str] = []
-    for ans in payload.get("Answer", []) or []:
-        if not isinstance(ans, dict) or ans.get("type") != rr_code:
-            continue
-        raw = str(ans.get("data", "")).strip()
+    values = []
+    for ans in dns_answers(json.loads(response.body), domain, rr_code):
+        raw = ans["data"].strip()
         if rrtype == "A":
             try:
-                ip_obj = ipaddress.ip_address(raw)
-                if ip_obj.is_global and not ip_obj.is_multicast:
-                    values.append(str(ip_obj))
-            except ValueError:
-                continue
-        elif rrtype == "MX":
+                ip_obj = ipaddress.IPv4Address(raw)
+            except ValueError as exc:
+                raise ValueError("Invalid DNS A address") from exc
+            if ip_obj.is_global and not ip_obj.is_multicast:
+                values.append(str(ip_obj))
+        else:
             parts = raw.split()
-            exchange = normalize_hostname(parts[-1] if parts else "")
-            if exchange:
-                values.append(exchange)
+            if len(parts) != 2 or not parts[0].isdigit() or not 0 <= int(parts[0]) <= 65535:
+                raise ValueError("Invalid MX preference/exchange")
+            if parts == ["0", "."]:  # RFC 7505: the domain explicitly accepts no mail.
+                continue
+            exchange = normalize_hostname(parts[1])
+            if not exchange:
+                raise ValueError("Invalid MX exchange")
+            values.append(exchange)
     return list(dict.fromkeys(values))
 
 
@@ -121,10 +142,12 @@ def probe_domain_dns_signals(domain: str) -> dict:
     a_records: list[str] = []
     mx_records: list[str] = []
     errors: list[str] = []
+    successful_types = []
     for rrtype, bucket in (("A", a_records), ("MX", mx_records)):
         try:
             bucket.extend(_query_doh_rr(host, rrtype))
-        except (ValueError, OSError, KeyError, TypeError) as exc:
+            successful_types.append(rrtype)
+        except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as exc:
             errors.append(f"{rrtype}: {exc}")
     return {
         "domain": host,
@@ -132,6 +155,7 @@ def probe_domain_dns_signals(domain: str) -> dict:
         "mx_records": mx_records,
         "live_dns": bool(a_records or mx_records),
         "errors": errors,
+        "successful_types": successful_types,
         "authoritative": False,
         "use": "UNVERIFIED_DNS_LEAD",
     }
@@ -176,43 +200,72 @@ def run_radar_scan(brand_dir: Path, profile: dict, *, include_lookalikes: bool =
     for keyword in keywords:
         try:
             rows.extend(_fetch_crt_json(keyword)); successes.append(keyword)
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, TypeError, AttributeError, RecursionError) as exc:
             errors.append({"keyword": keyword, "error": str(exc)})
     candidates = extract_candidate_domains_from_crt(rows, allowlist, set())
     candidates = [host for host in candidates if any(k.lower() in host for k in keywords)]
+    path = brand_dir / "radar_seen.json"
+    seed = hashlib.sha256(json.dumps([profile["official_domains"], allowlist], sort_keys=True).encode()).hexdigest()
+    with locked(brand_dir / ".radar.lock"):
+        initial = read_json(path) if path.exists() else {}
+        offset = initial.get("lookalike_cursor", 0) if initial.get("lookalike_seed") == seed else 0
+        if type(offset) is not int or offset < 0:
+            raise ValueError("Invalid lookalike scan cursor")
     live_lookalikes: list[dict] = []
     lookalike_probes_ok = 0
     lookalike_checked = 0
     if include_lookalikes:
         capped = max(1, min(int(lookalike_limit), 60))
-        for item in generate_lookalike_domains(profile["official_domains"], allowlist, max_variants=capped):
+        for item in generate_lookalike_domains(profile["official_domains"], allowlist, max_variants=capped, offset=offset):
             lookalike_checked += 1
             probe = probe_domain_dns_signals(item["domain"])
             if probe["live_dns"]:
                 live_lookalikes.append({**item, "a_records": probe["a_records"], "mx_records": probe["mx_records"]})
+            if probe.get("successful_types") or probe["live_dns"] or not probe["errors"]:
                 lookalike_probes_ok += 1
-            elif probe["errors"]:
+            if probe["errors"]:
                 errors.append({"lookalike": item["domain"], "error": "; ".join(probe["errors"])})
-            else:
-                lookalike_probes_ok += 1
     path = brand_dir / "radar_seen.json"
     with locked(brand_dir / ".radar.lock"):
         state = read_json(path) if path.exists() else {"schema_version": 2, "candidates": {}}
         if state.get("schema_version") != 2:
             raise ValueError("Legacy radar state requires reviewed migration; refusing silent reset")
+        if not isinstance(state.get("candidates"), dict):
+            raise ValueError("Invalid radar candidates")
         now = utc_now()
+        admitted = deferred = 0
+        def entry_for(host):
+            nonlocal admitted, deferred
+            if host in state["candidates"]:
+                return state["candidates"][host]
+            if len(state["candidates"]) >= MAX_RADAR_CANDIDATES or admitted >= MAX_NEW_PER_SCAN:
+                deferred += 1
+                return None
+            admitted += 1
+            entry = {"status": "PENDING_REVIEW", "first_seen_at": now}
+            state["candidates"][host] = entry
+            return entry
         for host in candidates:
-            entry = state["candidates"].setdefault(host, {"status": "PENDING_REVIEW", "first_seen_at": now})
-            entry["last_seen_at"] = now
+            entry = entry_for(host)
+            if entry is not None:
+                entry["last_seen_at"] = now
         for item in live_lookalikes:
-            entry = state["candidates"].setdefault(item["domain"], {"status": "PENDING_REVIEW", "first_seen_at": now})
+            entry = entry_for(item["domain"])
+            if entry is None:
+                continue
             entry["last_seen_at"] = now
             entry["source"] = "LOOKALIKE_DNS"
             entry["mutation_kind"] = item["mutation_kind"]
             entry["dns_a"] = item["a_records"]
             entry["dns_mx"] = item["mx_records"]
+        if deferred:
+            errors.append({"kind": "CAPACITY_LIMIT", "deferred_count": deferred,
+                           "error": "Candidate capacity reached; existing candidates retained. Export and archive reviewed candidates before continuing."})
+        if include_lookalikes and (state.get("lookalike_seed") != seed or state.get("lookalike_cursor", 0) == offset):
+            state["lookalike_seed"] = seed
+            state["lookalike_cursor"] = offset + lookalike_checked
         state.update(last_attempt_at=now, errors=errors)
-        if successes or lookalike_probes_ok:
+        if (successes or lookalike_probes_ok) and not errors:
             state["last_successful_query_at"] = now
         atomic_write_json(path, state)
         pending = sorted(host for host, item in state["candidates"].items() if item["status"] == "PENDING_REVIEW" and not is_allowlisted_url(host, allowlist))
@@ -237,6 +290,8 @@ def run_radar_scan(brand_dir: Path, profile: dict, *, include_lookalikes: bool =
 def triage(brand_dir: Path, domain: str, decision: str, reviewer: str, rationale: str) -> dict:
     if decision not in ("CONFIRMED_FOR_REVIEWED_CASE", "REJECTED", "AUTHORIZED") or not reviewer.strip() or not rationale.strip():
         raise ValueError("Explicit decision, reviewer and rationale required")
+    if len(reviewer) > 200 or len(rationale) > 4000:
+        raise ValueError("Reviewer or rationale exceeds length limit")
     path = safe_path(brand_dir) / "radar_seen.json"
     with locked(brand_dir / ".radar.lock"):
         state = read_json(path)

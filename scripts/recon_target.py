@@ -8,20 +8,20 @@ import ipaddress
 import json
 import os
 from pathlib import Path
-import platform
 import re
-import struct
-import subprocess
 import sys
-import tempfile
 import uuid
-from urllib.parse import quote
-import zlib
+from urllib.parse import quote, parse_qs
 
-from brand_registry import (COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES, DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
+from brand_registry import (DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
                             normalize_hostname, profile_allowlist, utc_now)
 from case_manager import assert_case_brand, case_profile, load_case, mutate_case
 from safe_http import fetch, resolve_addresses
+from domain_names import domain_candidates
+from dns_json import dns_answers
+from html_tools import bounded_html
+from image_hash import (compute_image_dhash, compare_images_dhash, dhash_hamming_distance,
+                        _decode_png_luma, _decode_bmp_luma, _decode_image_luma)
 from storage import atomic_write_bytes, atomic_write_json, locked, private_dir, read_json, safe_path
 
 _atomic_write_json = atomic_write_json
@@ -49,18 +49,28 @@ def _is_global_public_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) 
     return bool(ip_obj.is_global and not ip_obj.is_multicast and not ip_obj.is_unspecified and not transition)
 
 
+
 def extract_storefront_fingerprints(html: str, headers_text: str = "") -> dict:
-    """Untrusted leads only: page text cannot establish ownership or infringement."""
-    combined = html + "\n" + headers_text
+    """Read bounded page-controlled identifiers; do not infer merchant ownership."""
+    combined = bounded_html(html + "\n" + headers_text)
     patterns = {
-        "shopify_domains": r"\b[a-z0-9][a-z0-9-]*\.myshopify\.com\b",
-        "stripe_publishable_keys": r"\bpk_live_[0-9a-zA-Z]{16,}\b",
-        "paypal_client_ids": r"paypal\.com/sdk/js\?[^\"']*client-id=([A-Za-z0-9_-]{12,})",
-        "paypal_merchant_ids": r"merchant-id=([A-Z0-9]{8,24})",
+        "shopify_domains": r"\b[a-z0-9][a-z0-9-]{0,62}\.myshopify\.com\b",
+        "stripe_publishable_keys": r"\bpk_live_[0-9a-zA-Z]{16,256}\b",
+        "paypal_merchant_ids": r"merchant-id=([A-Z0-9]{8,24})\b",
         "ga_ids": r"\b(?:G-[A-Z0-9]{6,14}|UA-\d{4,12}-\d{1,4})\b",
-        "meta_pixel_ids": r"fbq\(\s*['\"]init['\"]\s*,\s*['\"](\d{10,20})['\"]",
+        "meta_pixel_ids": r"fbq\(\s{0,64}['\"]init['\"]\s{0,64},\s{0,64}['\"](\d{10,20})['\"]",
     }
     result = {key: sorted(set(re.findall(pattern, combined, re.I))) for key, pattern in patterns.items()}
+    client_ids = set()
+    # Non-overlapping bounded matches avoid rescanning the page from every prefix.
+    for match in re.finditer(r"\bpaypal\.com/sdk/js\?([^\s\"'<>]{0,4096})", combined, re.I):
+        try:
+            params = parse_qs(match[1].replace('&amp;', '&'), max_num_fields=64)
+        except ValueError:
+            continue
+        client_ids.update(value for value in params.get('client-id', [])
+                          if re.fullmatch(r'[A-Za-z0-9_-]{12,256}', value))
+    result['paypal_client_ids'] = sorted(client_ids)
     result["platform_hint"] = "shopify" if result["shopify_domains"] or "cdn.shopify.com" in combined.lower() else "unknown"
     result["confidence"] = "UNVERIFIED_PAGE_CONTROLLED_LEADS"
     result["needs_checkout_probe"] = not any(result[k] for k in ("stripe_publishable_keys", "paypal_client_ids", "paypal_merchant_ids"))
@@ -100,18 +110,27 @@ def _extract_vcard_field(vcard_array: object, field_name: str) -> list[str]:
     return values
 
 
+
 def _walk_rdap_entities(entities: object, inherited_roles: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], dict]]:
-    out: list[tuple[tuple[str, ...], dict]] = []
-    if not isinstance(entities, list):
+    out = []
+    if entities is None:
         return out
-    for ent in entities:
-        if not isinstance(ent, dict):
-            continue
-        own_roles = tuple(str(r).lower() for r in ent.get("roles", []) if str(r).strip())
-        roles = own_roles or inherited_roles
+    if not isinstance(entities, list):
+        raise ValueError("Invalid RDAP entities")
+    pending = [(e, inherited_roles, 0) for e in reversed(entities)]
+    while pending:
+        ent, inherited, depth = pending.pop()
+        if len(out) >= 2048 or depth > 16 or not isinstance(ent, dict):
+            raise ValueError("Invalid or excessive RDAP entity nesting")
+        raw_roles = ent.get("roles", [])
+        if not isinstance(raw_roles, list) or not all(isinstance(r, str) for r in raw_roles):
+            raise ValueError("Invalid RDAP entity roles")
+        roles = tuple(r.lower() for r in raw_roles) or inherited
         out.append((roles, ent))
-        if isinstance(ent.get("entities"), list):
-            out.extend(_walk_rdap_entities(ent.get("entities"), roles))
+        children = ent.get("entities", [])
+        if not isinstance(children, list) or len(children) + len(pending) + len(out) > 2048:
+            raise ValueError("Invalid or excessive RDAP entities")
+        pending.extend((e, roles, depth + 1) for e in reversed(children))
     return out
 
 
@@ -214,18 +233,9 @@ def parse_rdap_ip_json(payload: dict, queried_ip: str = "") -> dict:
     }
 
 
+
 def domain_rdap_candidates(host: str) -> list[str]:
-    """Generate ordered domain candidates from exact hostname up to registrable parent."""
-    clean = normalize_hostname(host)
-    if not clean or "." not in clean:
-        return []
-    labels = clean.split(".")
-    candidates: list[str] = []
-    for idx in range(0, max(1, len(labels) - 1)):
-        sub = ".".join(labels[idx:])
-        if "." in sub and sub not in COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES:
-            candidates.append(sub)
-    return candidates
+    return domain_candidates(host)
 
 
 def _find_domain_rdap_service(bootstrap_doc: dict, domain: str) -> str:
@@ -296,6 +306,9 @@ def query_rdap(host: str) -> dict:
             if not isinstance(document, dict) or document.get("errorCode") or document.get("objectClassName") != "domain":
                 last_error = f"Invalid RDAP domain response for {candidate}"
                 continue
+            if normalize_hostname(document.get("ldhName") or document.get("unicodeName") or "") != candidate:
+                last_error = f"RDAP object name differs from {candidate}"
+                continue
             return {
                 "ok": True,
                 "source": response.url,
@@ -306,7 +319,7 @@ def query_rdap(host: str) -> dict:
                 "use": "REGISTRATION_HINT_NOT_PROOF_OF_ABUSE",
             }
         raise ValueError(f"{last_error}; subdomains may require manual registered-domain lookup")
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         return {"ok": False, "requested_host": host, "queried_domain": host, "error": str(exc), "manual_lookup_required": True}
 
 
@@ -348,13 +361,15 @@ def query_ip_asn_doh(ip_str: str) -> dict:
         payload = json.loads(resp.body)
         if not isinstance(payload, dict):
             return {"ok": False, "error": "Invalid DoH JSON payload"}
-        for answer in payload.get("Answer", []) or []:
-            if isinstance(answer, dict) and answer.get("type") == 16:
-                parsed = _parse_cymru_txt_record(str(answer.get("data", "")))
-                if parsed:
-                    return {"ok": True, "source": "CYMRU_DOH_TXT", "queried_name": query_name, **parsed}
+        for answer in dns_answers(payload, query_name, 16):
+            parsed = _parse_cymru_txt_record(answer["data"])
+            if parsed:
+                network = ipaddress.ip_network(parsed["cidr"], strict=True)
+                if network.version != ip_obj.version or ip_obj not in network:
+                    raise ValueError("ASN prefix does not contain queried IP")
+                return {"ok": True, "source": "CYMRU_DOH_TXT", "queried_name": query_name, **parsed}
         return {"ok": False, "error": "No Cymru ASN TXT record returned"}
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         return {"ok": False, "error": str(exc)}
 
 
@@ -384,12 +399,18 @@ def query_ip_rdap(ip_str: str, bootstrap_cache: dict[int, dict] | None = None) -
         if resp.status != 200:
             raise ValueError(f"IP RDAP HTTP {resp.status}")
         document = json.loads(resp.body)
-        if not isinstance(document, dict) or document.get("errorCode"):
+        if not isinstance(document, dict) or document.get("errorCode") or document.get("objectClassName") != "ip network":
             raise ValueError("Invalid IP RDAP response document")
+        first = ipaddress.ip_address(document.get("startAddress", ""))
+        last = ipaddress.ip_address(document.get("endAddress", ""))
+        if first.version != ip_obj.version or last.version != ip_obj.version or not first <= ip_obj <= last:
+            raise ValueError("RDAP address range does not contain queried IP")
+        if document.get("ipVersion", f"v{ip_obj.version}") != f"v{ip_obj.version}":
+            raise ValueError("RDAP IP family differs from request")
         summary = parse_rdap_ip_json(document, queried_ip=norm_ip)
         rdap_source = resp.url
         rdap_ok = bool(summary)
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         errors.append(str(exc))
 
     asn_source = "RIR_RDAP" if summary.get("asns") else ""
@@ -473,13 +494,26 @@ def compute_manifest_hmac(manifest: dict, key: str) -> str:
     return hmac.new(key.encode("utf-8"), _manifest_hmac_payload(manifest), hashlib.sha256).hexdigest()
 
 
+def _hmac_policy(hmac_key=None, require_hmac=False):
+    key = hmac_key if hmac_key is not None else os.environ.get("BRAND_TAKEDOWN_HMAC_KEY", "")
+    flag = os.environ.get("BRAND_TAKEDOWN_REQUIRE_HMAC", "").strip().lower()
+    if flag not in ("", "0", "1", "false", "true"):
+        raise ValueError("BRAND_TAKEDOWN_REQUIRE_HMAC must be 0 or 1")
+    required = require_hmac or bool(key) or bool(os.environ.get("BRAND_TAKEDOWN_HMAC_KEY")) or flag in ("1", "true")
+    if required and not key:
+        raise ValueError("HMAC policy requires BRAND_TAKEDOWN_HMAC_KEY")
+    return key, required
+
+
 def verify_manifest(directory: Path, *, hmac_key: str | None = None, require_hmac: bool = False) -> dict:
     directory = safe_path(directory)
     manifest = read_json(directory / "evidence-manifest.json")
     if manifest.get("files") != _entries(directory):
         raise ValueError("EVIDENCE INTEGRITY FAILURE: changed, missing or unsealed files")
-    key = hmac_key if hmac_key is not None else os.environ.get("BRAND_TAKEDOWN_HMAC_KEY", "")
+    key, require_hmac = _hmac_policy(hmac_key, require_hmac)
     if "hmac_sha256" in manifest:
+        if manifest.get("hmac_algorithm") != "HMAC-SHA256":
+            raise ValueError("EVIDENCE INTEGRITY FAILURE: unsupported HMAC algorithm")
         if not key:
             raise ValueError("EVIDENCE INTEGRITY FAILURE: HMAC-protected manifest requires BRAND_TAKEDOWN_HMAC_KEY")
         expected = compute_manifest_hmac(manifest, key)
@@ -491,18 +525,18 @@ def verify_manifest(directory: Path, *, hmac_key: str | None = None, require_hma
 
 
 def build_evidence_manifest(evidence_dir: Path, target_url: str, direct_dns_ips: list[str], proxy_used: bool,
-                            *, hmac_key: str | None = None) -> dict:
+                            *, hmac_key: str | None = None, require_hmac: bool = False) -> dict:
+    key, required = _hmac_policy(hmac_key, require_hmac)
     evidence_dir = private_dir(evidence_dir)
     with locked(evidence_dir / ".evidence.lock"):
         if (evidence_dir / "evidence-manifest.json").exists():
-            return verify_manifest(evidence_dir, hmac_key=hmac_key)
+            return verify_manifest(evidence_dir, hmac_key=key, require_hmac=required)
         entries = _entries(evidence_dir)
         if not entries:
             raise ValueError("Cannot seal an empty capture")
         manifest = {"schema_version": 2, "capture_id": evidence_dir.name, "target_url": target_url,
                     "captured_at_utc": utc_now(), "direct_dns_ips": direct_dns_ips,
                     "http_fetch_used_proxy": bool(proxy_used), "files": entries}
-        key = hmac_key if hmac_key is not None else os.environ.get("BRAND_TAKEDOWN_HMAC_KEY", "")
         if key:
             manifest["hmac_algorithm"] = "HMAC-SHA256"
             manifest["hmac_sha256"] = compute_manifest_hmac(manifest, key)
@@ -519,7 +553,8 @@ def verify_capture(case_dir: Path, capture_id: str, *, hmac_key: str | None = No
     manifest_path = directory / "evidence-manifest.json"
     if hashlib.sha256(safe_path(manifest_path).read_bytes()).hexdigest() != record["manifest_sha256"]:
         raise ValueError("Manifest digest differs from the case's original seal")
-    return verify_manifest(directory, hmac_key=hmac_key, require_hmac=require_hmac)
+    required = require_hmac or case_profile(case_dir).get("require_evidence_hmac", False)
+    return verify_manifest(directory, hmac_key=hmac_key, require_hmac=required)
 
 
 def refresh_case_manifest(case_dir: Path, *, hmac_key: str | None = None, require_hmac: bool = False) -> dict:
@@ -534,6 +569,7 @@ def refresh_case_manifest(case_dir: Path, *, hmac_key: str | None = None, requir
 def run_recon(target_url: str, case_dir: Path, allowlist_domains=None, proxy=None, referer=None) -> dict:
     data = load_case(case_dir)
     profile = case_profile(case_dir)
+    _hmac_policy(require_hmac=profile.get("require_evidence_hmac", False))
     url = check_target(target_url, profile)
     if url not in data["target_urls"]:
         raise ValueError("Target URL is not registered in this case")
@@ -562,7 +598,8 @@ def run_recon(target_url: str, case_dir: Path, allowlist_domains=None, proxy=Non
     report["ip_intel"] = query_ip_intel(ip_candidates, limit=2) if ip_candidates else []
     report["finished_at_utc"] = utc_now()
     atomic_write_json(directory / "recon-report.json", report)
-    manifest = build_evidence_manifest(directory, url, dns.get("A", []) + dns.get("AAAA", []), False)
+    manifest = build_evidence_manifest(directory, url, dns.get("A", []) + dns.get("AAAA", []), False,
+                                       require_hmac=profile.get("require_evidence_hmac", False))
     seal = hashlib.sha256((directory / "evidence-manifest.json").read_bytes()).hexdigest()
     def record(case):
         case["captures"].append({"capture_id": directory.name, "target_url": url, "status": report["capture_status"],
@@ -578,7 +615,9 @@ def run_recon(target_url: str, case_dir: Path, allowlist_domains=None, proxy=Non
 def add_evidence(case_dir: Path, target_url: str, source: Path) -> dict:
     """Attach a user-reviewed screenshot/document as a NEW capture, never edit one."""
     data = load_case(case_dir)
-    target = check_target(target_url, case_profile(case_dir))
+    profile = case_profile(case_dir)
+    _hmac_policy(require_hmac=profile.get("require_evidence_hmac", False))
+    target = check_target(target_url, profile)
     if target not in data["target_urls"]:
         raise ValueError("Unknown case target")
     source = safe_path(source)
@@ -593,7 +632,7 @@ def add_evidence(case_dir: Path, target_url: str, source: Path) -> dict:
     directory = safe_path(case_dir) / "evidence" / ("CAP-" + uuid.uuid4().hex)
     directory.mkdir(mode=0o700, exist_ok=False)
     atomic_write_bytes(directory / source.name, content)
-    manifest = build_evidence_manifest(directory, target, [], False)
+    manifest = build_evidence_manifest(directory, target, [], False, require_hmac=profile.get("require_evidence_hmac", False))
     def record(case):
         case["captures"].append({"capture_id": directory.name, "target_url": target, "status": "USER_SUPPLIED",
             "manifest_sha256": hashlib.sha256((directory / "evidence-manifest.json").read_bytes()).hexdigest(),
@@ -604,201 +643,6 @@ def add_evidence(case_dir: Path, target_url: str, source: Path) -> dict:
 
 def trigger_wayback_save(target_url: str, allowlist_domains=None) -> dict:
     raise ValueError("Automatic public archiving disabled: explicit external publication review required")
-
-
-_MAX_IMAGE_FILE_BYTES = 25 * 1024 * 1024
-_MAX_IMAGE_PIXELS = 4096 * 4096
-_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
-
-
-def _paeth(a: int, b: int, c: int) -> int:
-    p = a + b - c
-    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-    return a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-
-
-def _decode_png_luma(raw: bytes) -> tuple[int, int, list[int]]:
-    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise ValueError("Invalid PNG header")
-    pos = 8
-    width = height = bit_depth = color_type = 0
-    palette = b""
-    idat_chunks: list[bytes] = []
-    while pos + 12 <= len(raw):
-        length = struct.unpack(">I", raw[pos:pos + 4])[0]
-        ctype = raw[pos + 4:pos + 8]
-        data_end = pos + 8 + length
-        if data_end + 4 > len(raw):
-            raise ValueError("Truncated PNG chunk")
-        chunk_data = raw[pos + 8:data_end]
-        pos = data_end + 4
-        if ctype == b"IHDR" and len(chunk_data) == 13:
-            width, height, bit_depth, color_type, comp, flt, interlace = struct.unpack(">IIBBBBB", chunk_data)
-            if width < 1 or height < 1 or width * height > _MAX_IMAGE_PIXELS:
-                raise ValueError("PNG dimensions out of budget")
-            if bit_depth != 8 or comp != 0 or flt != 0 or interlace != 0:
-                raise ValueError("Only 8-bit non-interlaced PNG images are supported")
-        elif ctype == b"PLTE":
-            palette = chunk_data
-        elif ctype == b"IDAT":
-            idat_chunks.append(chunk_data)
-        elif ctype == b"IEND":
-            break
-    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
-    if not width or not channels or not idat_chunks:
-        raise ValueError("Unsupported or incomplete PNG color/stream structure")
-    stride = width * channels
-    expected = height * (1 + stride)
-    if expected > _MAX_DECOMPRESSED_BYTES:
-        raise ValueError("Decompressed PNG exceeds memory budget")
-    decomp = zlib.decompressobj()
-    inflated = decomp.decompress(b"".join(idat_chunks), _MAX_DECOMPRESSED_BYTES + 1)
-    if len(inflated) != expected:
-        raise ValueError("Unexpected PNG image stream length")
-    luma: list[int] = []
-    prev_row = bytearray(stride)
-    for y in range(height):
-        row_start = y * (1 + stride)
-        ftype = inflated[row_start]
-        src = inflated[row_start + 1:row_start + 1 + stride]
-        cur = bytearray(stride)
-        for i in range(stride):
-            a = cur[i - channels] if i >= channels else 0
-            b = prev_row[i]
-            c = prev_row[i - channels] if i >= channels else 0
-            x = src[i]
-            if ftype == 0:
-                cur[i] = x
-            elif ftype == 1:
-                cur[i] = (x + a) & 0xFF
-            elif ftype == 2:
-                cur[i] = (x + b) & 0xFF
-            elif ftype == 3:
-                cur[i] = (x + ((a + b) >> 1)) & 0xFF
-            elif ftype == 4:
-                cur[i] = (x + _paeth(a, b, c)) & 0xFF
-            else:
-                raise ValueError(f"Unsupported PNG filter byte {ftype}")
-        prev_row = cur
-        for px in range(width):
-            idx = px * channels
-            if color_type in (0, 4):
-                luma.append(cur[idx])
-            elif color_type in (2, 6):
-                luma.append((299 * cur[idx] + 587 * cur[idx + 1] + 114 * cur[idx + 2]) // 1000)
-            else:
-                pi = cur[idx] * 3
-                if pi + 3 > len(palette):
-                    raise ValueError("PNG palette index out of range")
-                luma.append((299 * palette[pi] + 587 * palette[pi + 1] + 114 * palette[pi + 2]) // 1000)
-    return width, height, luma
-
-
-def _decode_bmp_luma(raw: bytes) -> tuple[int, int, list[int]]:
-    if len(raw) < 54 or not raw.startswith(b"BM"):
-        raise ValueError("Invalid BMP header")
-    offset, dib_size = struct.unpack("<II", raw[10:18])
-    if dib_size < 40 or len(raw) < 14 + dib_size:
-        raise ValueError("Unsupported BMP header")
-    width, raw_height, _, bpp, compression = struct.unpack("<iiHHI", raw[18:34])
-    top_down = raw_height < 0
-    height = abs(raw_height)
-    if width < 1 or height < 1 or width * height > _MAX_IMAGE_PIXELS or compression != 0 or bpp not in (8, 24, 32):
-        raise ValueError("Only uncompressed 8/24/32-bit BMP within dimension limits is supported")
-    row_stride = ((bpp * width + 31) // 32) * 4
-    if offset + row_stride * height > len(raw):
-        raise ValueError("Truncated BMP pixel array")
-    bytes_per_px = bpp // 8
-    luma: list[int] = []
-    for y in range(height):
-        src_y = y if top_down else (height - 1 - y)
-        row_base = offset + src_y * row_stride
-        for x in range(width):
-            p = row_base + x * bytes_per_px
-            if bytes_per_px == 1:
-                luma.append(raw[p])
-            else:
-                b_v, g_v, r_v = raw[p], raw[p + 1], raw[p + 2]
-                luma.append((299 * r_v + 587 * g_v + 114 * b_v) // 1000)
-    return width, height, luma
-
-
-def _decode_image_luma(path: Path) -> tuple[int, int, list[int]]:
-    clean_path = safe_path(path)
-    if not clean_path.is_file() or clean_path.stat().st_size > _MAX_IMAGE_FILE_BYTES:
-        raise ValueError("Image must be a regular file up to 25 MiB")
-    with clean_path.open("rb") as stream:
-        raw = stream.read(_MAX_IMAGE_FILE_BYTES + 1)
-    if not raw or len(raw) > _MAX_IMAGE_FILE_BYTES:
-        raise ValueError("Image is empty or exceeds size budget")
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return _decode_png_luma(raw)
-    if raw.startswith(b"BM"):
-        return _decode_bmp_luma(raw)
-    if platform.system() == "Darwin" and Path("/usr/bin/sips").is_file():
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_png = Path(tmpdir) / "converted.png"
-            try:
-                subprocess.run(["/usr/bin/sips", "-s", "format", "png", str(clean_path), "--out", str(tmp_png)],
-                               check=True, capture_output=True, timeout=15)
-                if not tmp_png.is_file():
-                    raise ValueError("sips did not produce output PNG")
-                return _decode_png_luma(tmp_png.read_bytes())
-            except (subprocess.SubprocessError, OSError, ValueError) as exc:
-                raise ValueError(f"Unsupported or unreadable image format: {exc}") from exc
-    raise ValueError("Unsupported image encoding without native decoder; convert to PNG or BMP")
-
-
-def compute_image_dhash(path: Path) -> str:
-    """Compute a 64-bit horizontal difference hash (dHash) with zero external packages."""
-    width, height, luma = _decode_image_luma(path)
-    grid: list[list[int]] = []
-    for gy in range(8):
-        y0 = (gy * height) // 8
-        y1 = max(y0 + 1, ((gy + 1) * height) // 8)
-        row: list[int] = []
-        for gx in range(9):
-            x0 = (gx * width) // 9
-            x1 = max(x0 + 1, ((gx + 1) * width) // 9)
-            total = count = 0
-            for py in range(min(y0, height - 1), min(y1, height)):
-                base = py * width
-                for px in range(min(x0, width - 1), min(x1, width)):
-                    total += luma[base + px]
-                    count += 1
-            row.append(total // max(1, count))
-        grid.append(row)
-    bits = 0
-    for gy in range(8):
-        for gx in range(8):
-            bits = (bits << 1) | int(grid[gy][gx] < grid[gy][gx + 1])
-    return f"{bits:016x}"
-
-
-def dhash_hamming_distance(hash_a: str, hash_b: str) -> int:
-    if not re.fullmatch(r"[0-9a-fA-F]{16}", hash_a) or not re.fullmatch(r"[0-9a-fA-F]{16}", hash_b):
-        raise ValueError("Expected 16-hex-character dHash values")
-    return (int(hash_a, 16) ^ int(hash_b, 16)).bit_count()
-
-
-def compare_images_dhash(original_path: Path, suspect_path: Path, threshold: int = 10) -> dict:
-    """Compare two images by 64-bit dHash Hamming distance as a visual similarity lead."""
-    if not 0 <= threshold <= 64:
-        raise ValueError("dHash threshold must be between 0 and 64")
-    h1 = compute_image_dhash(original_path)
-    h2 = compute_image_dhash(suspect_path)
-    dist = dhash_hamming_distance(h1, h2)
-    return {
-        "algorithm": "dhash-64",
-        "original_dhash": h1,
-        "suspect_dhash": h2,
-        "hamming_distance": dist,
-        "max_bits": 64,
-        "threshold": threshold,
-        "candidate_similar": dist <= threshold,
-        "use": "VISUAL_SIMILARITY_HINT_NOT_PROOF_OF_INFRINGEMENT",
-        "trusted_as_instructions": False,
-    }
 
 
 def _main(argv=None) -> int:

@@ -105,3 +105,9 @@ class TestSkillIntegrity(unittest.TestCase):
         data = json.loads((ROOT / "references/policy-sources.json").read_text())
         self.assertIn("2026-11-12", json.dumps(data))
         self.assertGreaterEqual(len(data["sources"]), 8)
+
+    def test_source_manifest_is_complete_in_installation(self):
+        from verify_source import verify_source
+        entries = json.loads((ROOT / "docs/source-checksums.json").read_text())["files"]
+        self.assertEqual(set(entries), set(FILES) - {"docs/source-checksums.json"})
+        self.assertEqual(verify_source(ROOT), len(entries))
