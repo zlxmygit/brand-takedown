@@ -1,0 +1,30 @@
+name: Public suffix update check
+on:
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Compare pinned and upstream commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/update_psl.py check > "$RUNNER_TEMP/psl-check.json"
+          python - <<'PY'
+          import json, os, pathlib
+          result = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'psl-check.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write('Public suffix update available: ' + str(result['update_available']) + '\n\n')
+              stream.write('Current: `' + result['current_commit'] + '`\n\nUpstream: `' + result['upstream_commit'] + '`\n')
+          PY

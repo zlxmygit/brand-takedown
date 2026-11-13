@@ -6,6 +6,7 @@ There is no SMTP/Gmail/web-form submission in this module.
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -15,7 +16,7 @@ import sys
 import uuid
 
 from brand_registry import DEFAULT_REGISTRY_PATH, check_target, load_brand_profile, normalize_hostname, sanitize_http_url, utc_now
-from case_manager import _parse_iso_utc, assert_case_brand, case_profile, load_case
+from case_manager import _parse_iso_utc, assert_case_brand, case_profile, load_case, submission_context
 from recon_target import verify_capture
 from storage import atomic_write_bytes, atomic_write_json, locked, read_json, safe_path
 
@@ -75,8 +76,9 @@ def _validate_request(case_dir: Path, request: dict) -> tuple[dict, dict, dict]:
     if route not in ROUTES:
         raise ValueError("Unknown legal route")
     channel = next((c for c in case["channels"] if c["channel_id"] == request.get("channel_id")), None)
-    if channel is None or channel["status"] in ("RESOLVED", "REJECTED"):
+    if channel is None or (channel["status"] in ("RESOLVED", "REJECTED") and request.get("submission_kind") != "COUNTER_NOTICE_RESPONSE"):
         raise ValueError("Missing or closed channel")
+    submission_context(case, channel, request)
     if channel["channel_class"] == "REGULATORY_FILING" and route not in ("REGULATORY_FILING", "SAFETY_REFERRAL"):
         raise ValueError("Regulatory channels require an informational filing route")
     for field in ("subject", "endpoint_source_url", "endpoint_verified_by", "endpoint_verified_at", "provider_role", "scope_reason", "authorization_fair_use_review", "rights_verified_by", "rights_verified_at"):
@@ -152,7 +154,14 @@ def _validate_request(case_dir: Path, request: dict) -> tuple[dict, dict, dict]:
 
 
 def _prepare_packet(case_dir: Path, request: dict) -> dict:
+    request = copy.deepcopy(request)
     case, profile, channel = _validate_request(case_dir, request)
+    kind, tier = submission_context(case, channel, request)
+    request["submission_kind"] = kind
+    if kind == "SUPPLEMENT":
+        request["thread_ref"] = channel.get("ticket_ref") or next(
+            h["submission_ref"] for h in reversed(channel["history"]) if h.get("event") == "transmission_recorded")
+        request["supplement_cycle"] = channel.get("supplement_cycle", 0)
     packet_id = "PKT-" + uuid.uuid4().hex
     directory = _packet_path(case_dir, packet_id)
     directory.mkdir(mode=0o700, exist_ok=False)
@@ -181,6 +190,11 @@ def _prepare_packet(case_dir: Path, request: dict) -> dict:
         attachments.append({"filename": name, "sha256": _digest(content), "size_bytes": len(content)})
     lines = ["Dear Review Team,", "", f"{profile['legal_entity_name_en']} requests review of the following alleged issues.",
              f"Selected route: {request['route']}; scope: {request['scope_reason']}", ""]
+    if kind == "SUPPLEMENT":
+        lines.extend(["Supplement to ticket/reference: " + request["thread_ref"], ""])
+    elif kind == "COUNTER_NOTICE_RESPONSE":
+        lines = ["Dear Review Team,", "", "Response concerning a received counter-notice.",
+                 "Source reference: " + request["response_source_ref"], request["response_text"], "", "Supporting facts:"]
     for claim in request["claims"]:
         lines.extend([f"URL: {claim['target_url']}", f"Claim: {claim['kind']}", f"Allegation: {claim['statement']}",
                       f"Observed comparison/facts: {claim['comparison_or_observed_facts']}", f"Basis for review: {claim['legal_basis']}"])
@@ -191,9 +205,12 @@ def _prepare_packet(case_dir: Path, request: dict) -> dict:
         if claim["kind"] == "PRODUCT_SAFETY":
             lines.append("Specific requirement and observed defect: " + claim["specific_requirement_and_defect"])
         lines.append("")
-    lines.extend(["Please assess the evidence and take appropriate, proportionate action under the applicable policy or law.",
-                  "Please acknowledge receipt and provide your decision and any available review route."])
-    if request["route"] == "COPYRIGHT_NOTICE":
+    if kind != "COUNTER_NOTICE_RESPONSE":
+        lines.append("Please assess the evidence and take appropriate, proportionate action under the applicable policy or law.")
+    lines.append("Please acknowledge receipt and provide your decision and any available review route.")
+    if kind == "COUNTER_NOTICE_RESPONSE":
+        pass  # The reviewed response text specifies the requested action.
+    elif request["route"] == "COPYRIGHT_NOTICE":
         lines.extend(["I have a good faith belief that use of the material in the manner complained of is not authorized by the copyright owner, its agent, or the law.",
                       "The information in this notification is accurate, and under penalty of perjury I am authorized to act on behalf of the owner of an exclusive right that is allegedly infringed."])
     elif request["route"] == "DSA_NOTICE":
@@ -212,7 +229,8 @@ def _prepare_packet(case_dir: Path, request: dict) -> dict:
     atomic_write_bytes(directory / "notice.txt", body.encode("utf-8"))
     packet = {"schema_version": 2, "packet_id": packet_id, "case_id": case["case_id"], "brand_id": profile["brand_id"],
         "profile_sha256": _digest((safe_path(case_dir).parent.parent / "profile.json").read_bytes()),
-        "channel_id": channel["channel_id"], "endpoint": channel["target_endpoint"], "tier": channel.get("pending_tier", 1),
+        "channel_id": channel["channel_id"], "endpoint": channel["target_endpoint"], "tier": tier,
+        "submission_kind": kind, "legal_review_epoch": channel.get("legal_review_epoch", 0),
         "from_addr": signer["legal_email"], "signatory_mode": signatory_mode,
         "public_archive_expected": bool(request.get("public_archive_expected")),
         "disclosure_advisory": "Notices may be forwarded to the merchant and indexed in public archives (e.g., Lumen Database); redact personal PII before approval.",
@@ -230,6 +248,11 @@ def _verify_packet(case_dir: Path, packet_id: str) -> dict:
     case, profile, channel = _validate_request(case_dir, packet["request"])
     if packet["case_id"] != case["case_id"] or packet["brand_id"] != profile["brand_id"] or packet["endpoint"] != channel["target_endpoint"]:
         raise ValueError("Packet context changed")
+    kind, tier = submission_context(case, channel, packet["request"])
+    if packet.get("submission_kind", kind) != kind or packet["tier"] != tier:
+        raise ValueError("Packet submission context changed; prepare a new packet")
+    if packet.get("legal_review_epoch", 0) != channel.get("legal_review_epoch", 0):
+        raise ValueError("Legal review changed; regenerate and reapprove packet")
     signer, _, signatory_mode = _select_signatory(profile, packet["request"])
     if packet.get("signatory_mode") != signatory_mode or packet.get("from_addr") != signer["legal_email"]:
         raise ValueError("Packet signer differs from configured identity")

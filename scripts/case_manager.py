@@ -135,6 +135,8 @@ def create_case(brand_dir: Path, target_url: str, infringement_types: list[str],
                 def merge(data):
                     if url not in data["target_urls"]:
                         data["target_urls"].append(url)
+                        if data.get("liveness_review", {}).get("decision") == "DOWN":
+                            data["liveness_state"] = "SCOPE_CHANGED_REVIEW"
                     data["infringement_types"] = sorted(set(data["infringement_types"] + infringement_types))
                 return child, mutate_case(child, "target_merged", merge)
         case_id = "CASE-" + uuid.uuid4().hex
@@ -186,43 +188,101 @@ def upsert_channel(case_dir: Path, channel_id: str, channel_class: str, category
     return mutate_case(case_dir, "channel_draft_registered", update)
 
 
+def open_legal_tasks(data: dict, channel_id: str) -> list[dict]:
+    return [t for t in data.get("counter_notices", [])
+            if t.get("status") == "OPEN" and t.get("channel_id") == channel_id]
+
+
+def submission_context(data: dict, channel: dict, request: dict) -> tuple[str, int]:
+    """One policy for preparation, approval, export and receipt registration."""
+    kind = request.get("submission_kind")
+    if kind is None:
+        kind = ("INITIAL" if not channel["submitted_at"] else
+                "SUPPLEMENT" if channel["status"] == "NEED_MORE_INFO" else
+                "ESCALATION" if channel.get("pending_tier") else "INITIAL")
+    if kind not in ("INITIAL", "SUPPLEMENT", "ESCALATION", "COUNTER_NOTICE_RESPONSE"):
+        raise ValueError("Unknown submission_kind")
+    tasks = open_legal_tasks(data, channel["channel_id"])
+    if kind == "COUNTER_NOTICE_RESPONSE":
+        task = next((t for t in tasks if t["task_id"] == request.get("legal_task_id")), None)
+        if task is None:
+            raise ConflictError("Response requires an open legal task on this channel")
+        if request.get("response_source_ref") != task["source_ref"]:
+            raise ConflictError("Response source differs from the recorded counter-notice")
+        for field in ("response_text", "response_reviewed_by", "response_source_ref"):
+            if not isinstance(request.get(field), str) or not request[field].strip():
+                raise ValueError(f"Counter-notice response requires {field}")
+        return kind, channel["escalation_tier"]
+    if tasks:
+        raise ConflictError("Channel paused for an open counter-notice; use a reviewed COUNTER_NOTICE_RESPONSE")
+    if kind == "INITIAL":
+        if channel["submitted_at"]:
+            raise ConflictError("Initial transmission already recorded; select supplement or plan escalation")
+        return kind, 1
+    if not channel["submitted_at"]:
+        raise ConflictError("Follow-up requires an initial transmission")
+    if kind == "SUPPLEMENT":
+        if channel["status"] != "NEED_MORE_INFO":
+            raise ConflictError("Supplement requires a recorded provider request for more information")
+        expected_ref = channel.get("ticket_ref") or next(
+            (h["submission_ref"] for h in reversed(channel["history"]) if h.get("event") == "transmission_recorded"), "")
+        if not expected_ref or request.get("thread_ref", expected_ref) != expected_ref:
+            raise ConflictError("Supplement must reference the current provider ticket or transmission")
+        if request.get("supplement_cycle", channel.get("supplement_cycle", 0)) != channel.get("supplement_cycle", 0):
+            raise ConflictError("Supplement request changed; prepare a new packet")
+        return kind, channel["escalation_tier"]
+    if not channel.get("pending_tier") or channel["status"] == "NEED_MORE_INFO":
+        raise ConflictError("Escalation requires a due, planned escalation draft")
+    return kind, channel["pending_tier"]
+
+
 def confirm_submission(case_dir: Path, channel_id: str, packet_id: str, submission_ref: str, sent_at: str) -> dict:
-    if not submission_ref.strip():
+    if not isinstance(submission_ref, str) or not submission_ref.strip():
         raise ValueError("Actual transmission receipt/reference required")
+    receipt = submission_ref.strip()
     sent = _parse_iso_utc(sent_at)
     if sent > datetime.now(timezone.utc) + timedelta(minutes=5):
         raise ValueError("Transmission timestamp is in the future")
     def submit(data):
         from packets import verify_approved_packet
         channel = _channel(data, channel_id)
+        if any(h.get("packet_id") == packet_id or h.get("submission_ref") == receipt for h in channel["history"]):
+            raise ConflictError("Packet or transmission receipt already recorded")
         packet = verify_approved_packet(case_dir, packet_id)
         if packet["channel_id"] != channel_id or packet["endpoint"] != channel["target_endpoint"]:
             raise ConflictError("Approval does not match this channel")
-        if any(h.get("packet_id") == packet_id for h in channel["history"]):
-            raise ConflictError("Packet transmission already recorded")
-        if channel["status"] in ("RESOLVED", "REJECTED"):
+        if channel["status"] in ("RESOLVED", "REJECTED") and packet["request"].get("submission_kind") != "COUNTER_NOTICE_RESPONSE":
             raise ConflictError("Closed channel cannot be submitted")
-        pending = channel.get("pending_tier")
-        if channel["submitted_at"] and not pending:
-            raise ConflictError("Use a due escalation draft before a further transmission")
-        if pending and sent < _parse_iso_utc(channel["next_action_due_at"]):
+        kind, tier = submission_context(data, channel, packet["request"])
+        if kind == "ESCALATION" and sent < _parse_iso_utc(channel["next_action_due_at"]):
             raise ConflictError("Escalation transmission predates the follow-up window")
         if sent < _parse_iso_utc(packet["approval"]["approved_at"]):
             raise ConflictError("Transmission predates approval; review historical import separately")
-        tier = pending or 1
-        if packet["tier"] != tier:
-            raise ConflictError("Packet tier differs from planned submission")
-        if not channel["submitted_at"]:
-            channel["submitted_at"] = _format_iso_utc(sent)
-        channel["escalation_tier"] = tier
-        channel["status"] = "SUBMITTED" if tier == 1 else f"ESCALATED_TIER{tier}"
-        if channel["channel_class"] == "ENFORCEMENT_SLA":
-            hours = channel.pop("pending_hours", channel["sla_hours"])
-            channel["next_action_due_at"] = _format_iso_utc(sent + timedelta(hours=hours))
-        channel.pop("pending_tier", None)
-        channel["history"].append({"event": "transmission_recorded", "tier": tier, "packet_id": packet_id,
-                                   "submission_ref": submission_ref, "timestamp": _format_iso_utc(sent)})
-        data["status"] = "ACTIVE_ENFORCEMENT"
+        if packet["tier"] != tier or packet.get("submission_kind", kind) != kind:
+            raise ConflictError("Packet purpose or tier differs from planned submission")
+        event = {"event": "transmission_recorded", "kind": kind, "tier": tier, "packet_id": packet_id,
+                 "submission_ref": receipt, "timestamp": _format_iso_utc(sent)}
+        if kind == "COUNTER_NOTICE_RESPONSE":
+            event["legal_task_id"] = packet["request"]["legal_task_id"]
+            task = next(t for t in data["counter_notices"] if t["task_id"] == event["legal_task_id"])
+            task.setdefault("responses", []).append(dict(event))
+            # A response neither resolves the task nor restarts normal follow-ups.
+        else:
+            if not channel["submitted_at"]:
+                channel["submitted_at"] = _format_iso_utc(sent)
+            channel["escalation_tier"] = tier
+            channel["status"] = "SUBMITTED" if tier == 1 else f"ESCALATED_TIER{tier}"
+            if channel["channel_class"] == "ENFORCEMENT_SLA":
+                hours = channel.pop("pending_hours", channel["sla_hours"]) if kind == "ESCALATION" else channel.get("followup_hours", channel["sla_hours"])
+                channel["followup_hours"] = hours
+                channel["next_action_due_at"] = _format_iso_utc(sent + timedelta(hours=hours))
+            channel.pop("pending_tier", None)
+            channel.pop("pending_hours", None)
+            if kind == "SUPPLEMENT":
+                event["thread_ref"] = packet["request"]["thread_ref"]
+                event["supplement_cycle"] = packet["request"]["supplement_cycle"]
+            data["status"] = "ACTIVE_ENFORCEMENT"
+        channel["history"].append(event)
     return mutate_case(case_dir, "transmission_recorded", submit)
 
 
@@ -241,8 +301,14 @@ def update_channel_fields(case_dir: Path, channel_id: str, status=None, ticket_r
             channel["status"] = status
             if status in ("RESOLVED", "REJECTED"):
                 channel["next_action_due_at"] = ""
-            elif status == "NEED_MORE_INFO" and channel["channel_class"] == "ENFORCEMENT_SLA":
-                channel["next_action_due_at"] = utc_now()
+            elif status == "NEED_MORE_INFO":
+                channel["supplement_cycle"] = channel.get("supplement_cycle", 0) + 1
+                channel.pop("pending_tier", None)
+                channel.pop("pending_hours", None)
+                if channel["channel_class"] == "ENFORCEMENT_SLA" and not open_legal_tasks(data, channel_id):
+                    channel["next_action_due_at"] = utc_now()
+                elif channel.get("legal_pause"):
+                    channel["legal_pause"]["remaining_seconds"] = 0
         if ticket_ref:
             channel["ticket_ref"] = ticket_ref.strip()
         channel["history"].append({"event": "feedback", "status": channel["status"], "timestamp": utc_now()})
@@ -256,6 +322,8 @@ def add_linked_cloak_domain(case_dir: Path, cloak_domain: str, role="payment_b_s
     def update(data):
         if not any(item["domain"] == host for item in data["linked_payment_cloak_domains"]):
             data["linked_payment_cloak_domains"].append({"domain": host, "role": role, "status": "UNVERIFIED_LEAD", "discovered_at": utc_now()})
+            if data.get("liveness_review", {}).get("decision") == "DOWN":
+                data["liveness_state"] = "SCOPE_CHANGED_REVIEW"
     return mutate_case(case_dir, "linked_lead_added", update)
 
 
@@ -271,6 +339,11 @@ def scan_due_escalations(brand_dir: Path, now_iso=None) -> list[dict]:
                 if task["status"] == "OPEN":
                     items.append({"kind": "LEGAL_REVIEW", "case_id": data["case_id"], "case_dir": str(child), "task": task})
             for channel in data["channels"]:
+                if open_legal_tasks(data, channel["channel_id"]):
+                    continue
+                if channel["channel_class"] == "REGULATORY_FILING" and channel["status"] == "NEED_MORE_INFO":
+                    items.append({"kind": "SUPPLEMENT_REVIEW", "case_id": data["case_id"], "case_dir": str(child), **channel})
+                    continue
                 due = channel["next_action_due_at"]
                 if (channel["channel_class"] == "ENFORCEMENT_SLA" and channel["status"] in ACTIVE_SLA_CHANNEL_STATUSES
                         and due and now >= _parse_iso_utc(due)):
@@ -286,6 +359,10 @@ def advance_escalation_tier(case_dir: Path, channel_id: str, now_iso=None, next_
     hours = _hours(next_sla_hours)
     def advance(data):
         channel = _channel(data, channel_id)
+        if open_legal_tasks(data, channel_id):
+            raise ConflictError("Channel paused for an open counter-notice")
+        if channel["status"] == "NEED_MORE_INFO":
+            raise ConflictError("Prepare a supplement before planning another escalation")
         if (channel["channel_class"] != "ENFORCEMENT_SLA" or channel["status"] not in ACTIVE_SLA_CHANNEL_STATUSES
                 or not channel["submitted_at"] or not channel["next_action_due_at"]):
             raise ConflictError("Channel is not eligible for escalation")
@@ -310,9 +387,18 @@ def record_counter_notice(case_dir: Path, channel_id: str, received_at_iso: str,
         estimates = {"earliest_restore_estimate": _format_iso_utc(_add_business_days(local, 10)),
                      "latest_restore_estimate": _format_iso_utc(_add_business_days(local, 14))}
     def record(data):
-        _channel(data, channel_id)
-        if any(t["source_ref"] == source_ref for t in data["counter_notices"]):
+        channel = _channel(data, channel_id)
+        if any(t["source_ref"] == source_ref and t["channel_id"] == channel_id for t in data["counter_notices"]):
             return
+        if not open_legal_tasks(data, channel_id):
+            now = _parse_iso_utc(utc_now())
+            due = channel["next_action_due_at"]
+            channel["legal_pause"] = {"started_at": _format_iso_utc(now), "previous_due_at": due,
+                "remaining_seconds": max(0, (_parse_iso_utc(due) - now).total_seconds()) if due else None}
+            channel["next_action_due_at"] = ""
+        channel["legal_review_epoch"] = channel.get("legal_review_epoch", 0) + 1
+        channel.pop("pending_tier", None)
+        channel.pop("pending_hours", None)
         data["counter_notices"].append({"task_id": uuid.uuid4().hex, "status": "OPEN", "channel_id": channel_id,
             "received_by_rightsholder_at": _format_iso_utc(received), "provider_received_at": provider_received_at,
             "provider_timezone": provider_timezone, "source_ref": source_ref, "summary": summary,
@@ -328,10 +414,63 @@ def resolve_legal_task(case_dir: Path, task_id: str, reviewer: str, disposition:
         task = next((t for t in data["counter_notices"] if t["task_id"] == task_id), None)
         if task is None:
             raise KeyError(task_id)
+        if task["status"] != "OPEN":
+            raise ConflictError("Legal task already reviewed")
         task.update(status="REVIEWED", reviewer=reviewer, disposition=disposition, reviewed_at=utc_now())
+        channel = _channel(data, task["channel_id"])
+        channel["legal_review_epoch"] = channel.get("legal_review_epoch", 0) + 1
+        if not open_legal_tasks(data, task["channel_id"]):
+            pause = channel.pop("legal_pause", {})
+            remaining = pause.get("remaining_seconds")
+            if remaining is not None and channel["status"] in ACTIVE_SLA_CHANNEL_STATUSES:
+                channel["next_action_due_at"] = _format_iso_utc(_parse_iso_utc(utc_now()) + timedelta(seconds=remaining))
+            channel["history"].append({"event": "legal_pause_released", "reviewer": reviewer, "timestamp": utc_now()})
         if not any(t["status"] == "OPEN" for t in data["counter_notices"]):
-            data["status"] = "ACTIVE_ENFORCEMENT"
+            data["status"] = "WATCHLIST_RESURRECTION" if data.get("liveness_review", {}).get("decision") == "DOWN" else "ACTIVE_ENFORCEMENT"
     return mutate_case(case_dir, "legal_task_reviewed", resolve)
+
+
+def review_liveness(case_dir: Path, decision: str, reviewer: str, source_ref: str,
+                    evidence: list[dict], summary: str) -> dict:
+    if decision not in ("DOWN", "ACTIVE"):
+        raise ValueError("Liveness decision must be DOWN or ACTIVE")
+    if not all(isinstance(x, str) and x.strip() for x in (reviewer, source_ref, summary)):
+        raise ValueError("Reviewer, source reference and summary required")
+    if not isinstance(evidence, list) or not evidence:
+        raise ValueError("Liveness review requires sealed evidence references")
+    def review(data):
+        from recon_target import verify_capture
+        covered = set()
+        for ref in evidence:
+            if not isinstance(ref, dict) or not isinstance(ref.get("capture_id"), str) or not isinstance(ref.get("filename"), str):
+                raise ValueError("Invalid review evidence reference")
+            manifest = verify_capture(case_dir, ref["capture_id"])
+            capture = next(c for c in data["captures"] if c["capture_id"] == ref["capture_id"])
+            entry = next((f for f in manifest["files"] if f["filename"] == ref["filename"]), None)
+            if (capture["status"] not in ("CAPTURED", "USER_SUPPLIED", "PARTIAL") or not entry
+                    or not entry["size_bytes"] or ref["filename"] in ("recon-report.json", "headers.json")):
+                raise ValueError("Select substantive review evidence")
+            covered.add(manifest["target_url"])
+            if ref.get("observed_urls"):
+                if capture["status"] != "USER_SUPPLIED" or not isinstance(ref["observed_urls"], list):
+                    raise ValueError("Multi-URL observations require a user-supplied review document")
+                for observed in ref["observed_urls"]:
+                    covered.add(check_target(observed, case_profile(case_dir)))
+        required = set(data["target_urls"]) | {"https://" + item["domain"] + "/" for item in data["linked_payment_cloak_domains"]}
+        if decision == "DOWN" and not required.issubset(covered):
+            raise ValueError("A down review must cover every registered target and linked URL")
+        record = {"review_id": uuid.uuid4().hex, "decision": decision, "reviewer": reviewer.strip(),
+                  "source_ref": source_ref.strip(), "summary": summary.strip(), "evidence": evidence,
+                  "reviewed_at": utc_now(), "target_urls": list(data["target_urls"]),
+                  "linked_domains": [x["domain"] for x in data["linked_payment_cloak_domains"]]}
+        data.setdefault("liveness_reviews", []).append(record)
+        data["liveness_review"] = record
+        if data.get("resurrection_alert"):
+            data.setdefault("resurrection_alert_history", []).append(data["resurrection_alert"])
+        data.pop("resurrection_alert", None)
+        data["liveness_state"] = "REVIEWED_DOWN" if decision == "DOWN" else "REVIEWED_ACTIVE"
+        data["status"] = "WATCHLIST_RESURRECTION" if decision == "DOWN" else "ACTIVE_ENFORCEMENT"
+    return mutate_case(case_dir, "liveness_reviewed", review)
 
 
 def _main(argv=None) -> int:
@@ -344,11 +483,11 @@ def _main(argv=None) -> int:
     create.add_argument("--types", nargs="+", choices=INFRINGING_TYPES, required=True)
     for name in ("due", "summary"):
         p = sub.add_parser(name); p.add_argument("--slug", required=True)
-    for name in ("add-channel", "update-channel", "escalate", "add-cloak", "counter-notice", "submit", "resolve-legal"):
+    for name in ("add-channel", "update-channel", "escalate", "add-cloak", "counter-notice", "submit", "resolve-legal", "review-liveness"):
         p = sub.add_parser(name)
         p.add_argument("--slug", required=True)
         p.add_argument("--case-dir", type=Path, required=True)
-        if name not in ("add-cloak", "resolve-legal"):
+        if name not in ("add-cloak", "resolve-legal", "review-liveness"):
             p.add_argument("--channel-id", required=True)
         if name == "add-channel":
             p.add_argument("--channel-class", choices=CHANNEL_CLASSES, required=True)
@@ -364,6 +503,10 @@ def _main(argv=None) -> int:
         elif name == "submit":
             for field in ("packet-id", "submission-ref", "sent-at"):
                 p.add_argument("--" + field, required=True)
+        elif name == "review-liveness":
+            p.add_argument("--decision", choices=("DOWN", "ACTIVE"), required=True)
+            p.add_argument("--reviewer", required=True); p.add_argument("--source-ref", required=True)
+            p.add_argument("--summary", required=True); p.add_argument("--evidence-file", type=Path, required=True)
         elif name == "resolve-legal":
             for field in ("task-id", "reviewer", "disposition"):
                 p.add_argument("--" + field, required=True)
@@ -388,6 +531,9 @@ def _main(argv=None) -> int:
         result = add_linked_cloak_domain(args.case_dir, args.domain)
     elif args.cmd == "counter-notice":
         result = record_counter_notice(args.case_dir, args.channel_id, args.received_at, args.summary, args.provider_received_at, args.provider_timezone, args.source_ref)
+    elif args.cmd == "review-liveness":
+        refs = read_json(args.evidence_file).get("evidence")
+        result = review_liveness(args.case_dir, args.decision, args.reviewer, args.source_ref, refs, args.summary)
     elif args.cmd == "resolve-legal":
         result = resolve_legal_task(args.case_dir, args.task_id, args.reviewer, args.disposition)
     else:

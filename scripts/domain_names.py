@@ -4,13 +4,17 @@ import gzip
 from pathlib import Path
 from brand_registry import normalize_hostname
 
-PSL_SNAPSHOT = '823beb1425def931c8b0b170a6bc33b424c3f9b0'
 PSL_PATH = Path(__file__).resolve().parent.parent / 'references/public_suffix_list.dat.gz'
 
 
-@lru_cache(maxsize=2)
 def _rules(include_private: bool):
-    with gzip.open(PSL_PATH, 'rt', encoding='utf-8') as stream:
+    stat = PSL_PATH.stat()
+    return _cached_rules(include_private, str(PSL_PATH), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+@lru_cache(maxsize=4)
+def _cached_rules(include_private: bool, path: str, inode: int, size: int, modified_ns: int):
+    with gzip.open(path, 'rt', encoding='utf-8') as stream:
         text = stream.read(2 * 1024 * 1024 + 1)
     if len(text) > 2 * 1024 * 1024:
         raise ValueError('Public suffix snapshot exceeds size limit')

@@ -120,6 +120,8 @@ python3 scripts/recon_target.py compare-images --slug example-brand --case-dir "
 
 ---
 
+网页采集与指纹分析分别记录结果。大页面超出指纹分析预算时，已保存的原始页面和 HTTP 信息仍可用于材料审核。
+
 ### 第 3 步：核对举报通道并起草投诉材料
 
 先去服务商（域名注册商、托管服务器、CDN、收款支付机构或建站 SaaS 等）**官网**核对真实的侵权投诉入口，再让 AI 按对应法律路线起草投诉包：
@@ -204,7 +206,7 @@ python3 scripts/case_manager.py submit --slug example-brand \
 
 - **查待办与催办**：一眼看清哪些案件已经超期需要二轮/三轮升级催办，哪些被服务商要求补充材料（`NEED_MORE_INFO`）。
 - **下线复核不瞎猜**：巡检脚本会检查所有关联网址和隐匿跳转域，不会因为某一页偶发 404 就轻易判定“维权已彻底解决”；打开 `--check-rdap` 还能核对域名是否被注册商冻结解析（出现 `clienthold` / `serverhold` 状态）。
-- **收到反通知（Counter-Notice）必须报警**：一旦收到对方提出异议或反通知，立即登记来源凭证；系统会自动暂停该案的常规催办节奏、单列高优法律待办，并按 10–14 个工作日估算一个**仅供参照的窗口期**（具体法律时效与是否起诉须由律师确认）。
+- **收到反通知（Counter-Notice）必须报警**：一旦收到对方提出异议或反通知，立即登记来源凭证；系统会暂停对应通道的常规催办、单列高优法律待办，并按 10–14 个工作日估算一个**仅供参照的窗口期**（具体法律时效与是否起诉须由律师确认）。
 - **盯防近似仿冒域名**：定期运行雷达扫描，把排查出的新域名或近似拼写域名统一放入“待复核”队列，人工确认后决定是立即建案取证（`CONFIRMED_FOR_REVIEWED_CASE`）、误报忽略（`REJECTED`）还是授权域名放行（`AUTHORIZED`）。
 
 > **你可以这样对 AI 说：**  
@@ -244,7 +246,9 @@ python3 scripts/ct_radar.py --slug example-brand --triage-domain "lookalike-susp
 
 ---
 
-域名雷达按官网和变体类型轮换查询。每轮最多新增 2,000 条记录，累计保留 10,000 条；达到容量时返回 `PARTIAL` 并保留已有记录。DNS 查询失败单独报告，部分成功不会隐藏错误。
+补件使用 `submission_kind: "SUPPLEMENT"`，保留当前工单和升级轮次。反通知暂停对应通道，回应材料使用独立类型。下线复核、恢复告警和雷达归档命令见 [后续处理](references/followup-workflows.md)。
+
+域名雷达按官网和变体类型轮换查询。每轮最多新增 2,000 条记录，活动队列最多保留 10,000 条；达到容量时返回 `PARTIAL` 并保留已有记录。DNS 查询失败单独报告，部分成功不会隐藏错误。
 
 域名边界使用随包附带的 Public Suffix List 快照，包含通配符、例外规则和私有后缀。快照版本与许可见 [数据来源](references/public-suffix-license.md)。
 
@@ -310,3 +314,5 @@ cmp /tmp/brand-takedown-a.zip /tmp/brand-takedown-b.zip
 > `package_skill.py` 仅按白名单打包公开源码和文档，并在生成的可复现 `.zip` 压缩包内部附加 `SHA256SUMS.txt` 清单，不会夹带任何私有运行数据。开发规范见 [贡献指南](CONTRIBUTING.md)、[安全政策](SECURITY.md)、[行为准则](CODE_OF_CONDUCT.md) 与 [开源许可](LICENSE)。
 
 </details>
+
+公共后缀规则更新和主分支保护配置见 [仓库维护](references/maintenance.md)。

@@ -85,14 +85,31 @@ def probe_case(case_dir: Path, brand_keywords: list[str], proxy=None, referer=No
                             **rdap_meta, "error": str(exc)})
     active = any(r["verdict"] in ("CONTENT_PRESENT", "CONTENT_CHANGED_REVIEW") for r in results)
     record = {"checked_at_utc": utc_now(), "case_id": data["case_id"], "targets": results,
-              "verdict": "CONTENT_OBSERVED" if active else "REVIEW_REQUIRED",
-              "resurrected_alert": active and (data.get("liveness_state") == "REVIEWED_DOWN" or data["status"] in ("TAKEN_DOWN", "WATCHLIST_RESURRECTION"))}
+              "verdict": "CONTENT_OBSERVED" if active else "REVIEW_REQUIRED", "resurrected_alert": False}
     def update(current):
+        review = current.get("liveness_review", {})
+        down = review.get("decision") == "DOWN"
+        scope_matches = (review.get("target_urls") == current["target_urls"] and
+                         review.get("linked_domains") == [x["domain"] for x in current["linked_payment_cloak_domains"]])
+        # A probe that started before a newer review cannot contradict that review.
+        current_review_id = review.get("review_id")
+        same_review = current_review_id == data.get("liveness_review", {}).get("review_id")
+        legacy_down = not review and current.get("liveness_state") == "REVIEWED_DOWN"
+        if active and same_review and (down or legacy_down):
+            alert = current.setdefault("resurrection_alert", {
+                "review_id": current_review_id, "first_observed_at": record["checked_at_utc"]})
+            alert.update(last_observed_at=record["checked_at_utc"], targets=[r["target_url"] for r in results
+                         if r["verdict"] in ("CONTENT_PRESENT", "CONTENT_CHANGED_REVIEW")])
+        record["resurrected_alert"] = bool(current.get("resurrection_alert"))
         current["last_liveness_probe"] = record
-        current["liveness_state"] = record["verdict"]
-        # Enforcement and legal state deliberately unchanged.
+        if down:
+            current["liveness_state"] = ("CONTENT_RETURNED_REVIEW" if record["resurrected_alert"] else
+                                         "REVIEWED_DOWN" if scope_matches else "SCOPE_CHANGED_REVIEW")
+        elif same_review:
+            current["liveness_state"] = record["verdict"]
+        # Case and legal status are independent from network observations.
     after = mutate_case(case_dir, "liveness_observed", update)
-    return {**record, "case_status_after_probe": after["status"]}
+    return {**record, "case_status_after_probe": after["status"], "liveness_state": after["liveness_state"]}
 
 
 def patrol(brand_dir: Path, keywords: list[str], *, check_rdap: bool = False) -> dict:

@@ -590,8 +590,15 @@ def run_recon(target_url: str, case_dir: Path, allowlist_domains=None, proxy=Non
         atomic_write_json(directory / "headers.json", response.headers)
         report.update(final_url=response.url, http_status=response.status, peer_ip=response.peer_ip,
                       redirect_hops=response.hops, tls_sha256=response.tls_sha256,
-                      fingerprints=extract_storefront_fingerprints(response.body.decode("utf-8", errors="replace")))
+                      fingerprint_status="NOT_ANALYZED")
         report["capture_status"] = "CAPTURED" if 200 <= response.status < 300 and response.body else "PARTIAL"
+        # Analysis is optional enrichment; it cannot invalidate saved HTTP evidence.
+        try:
+            report["fingerprints"] = extract_storefront_fingerprints(response.body.decode("utf-8", errors="replace"))
+            report["fingerprint_status"] = "ANALYZED"
+        except (ValueError, OSError, TypeError, RecursionError) as exc:
+            report["fingerprint_status"] = "ANALYSIS_FAILED"
+            report["fingerprint_error"] = str(exc)
     except (ValueError, OSError) as exc:
         report["error"] = str(exc)
     ip_candidates = [*( [report["peer_ip"]] if report.get("peer_ip") else [] ), *(dns.get("A") or []), *(dns.get("AAAA") or [])]
