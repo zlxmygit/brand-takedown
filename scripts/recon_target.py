@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import ipaddress
 import json
+import os
 from pathlib import Path
+import platform
 import re
+import struct
+import subprocess
 import sys
+import tempfile
 import uuid
 from urllib.parse import quote
+import zlib
 
 from brand_registry import (COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES, DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
                             normalize_hostname, profile_allowlist, utc_now)
@@ -455,30 +462,55 @@ def _entries(directory: Path) -> list[dict]:
     return result
 
 
-def verify_manifest(directory: Path) -> dict:
+def _manifest_hmac_payload(manifest: dict) -> bytes:
+    body = {k: v for k, v in manifest.items() if k != "hmac_sha256"}
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def compute_manifest_hmac(manifest: dict, key: str) -> str:
+    if not key:
+        raise ValueError("Non-empty HMAC key required")
+    return hmac.new(key.encode("utf-8"), _manifest_hmac_payload(manifest), hashlib.sha256).hexdigest()
+
+
+def verify_manifest(directory: Path, *, hmac_key: str | None = None, require_hmac: bool = False) -> dict:
     directory = safe_path(directory)
     manifest = read_json(directory / "evidence-manifest.json")
     if manifest.get("files") != _entries(directory):
         raise ValueError("EVIDENCE INTEGRITY FAILURE: changed, missing or unsealed files")
+    key = hmac_key if hmac_key is not None else os.environ.get("BRAND_TAKEDOWN_HMAC_KEY", "")
+    if "hmac_sha256" in manifest:
+        if not key:
+            raise ValueError("EVIDENCE INTEGRITY FAILURE: HMAC-protected manifest requires BRAND_TAKEDOWN_HMAC_KEY")
+        expected = compute_manifest_hmac(manifest, key)
+        if not hmac.compare_digest(str(manifest["hmac_sha256"]), expected):
+            raise ValueError("EVIDENCE INTEGRITY FAILURE: invalid manifest HMAC-SHA256 signature")
+    elif require_hmac:
+        raise ValueError("EVIDENCE INTEGRITY FAILURE: missing required manifest HMAC-SHA256 signature")
     return manifest
 
 
-def build_evidence_manifest(evidence_dir: Path, target_url: str, direct_dns_ips: list[str], proxy_used: bool) -> dict:
+def build_evidence_manifest(evidence_dir: Path, target_url: str, direct_dns_ips: list[str], proxy_used: bool,
+                            *, hmac_key: str | None = None) -> dict:
     evidence_dir = private_dir(evidence_dir)
     with locked(evidence_dir / ".evidence.lock"):
         if (evidence_dir / "evidence-manifest.json").exists():
-            return verify_manifest(evidence_dir)
+            return verify_manifest(evidence_dir, hmac_key=hmac_key)
         entries = _entries(evidence_dir)
         if not entries:
             raise ValueError("Cannot seal an empty capture")
         manifest = {"schema_version": 2, "capture_id": evidence_dir.name, "target_url": target_url,
                     "captured_at_utc": utc_now(), "direct_dns_ips": direct_dns_ips,
                     "http_fetch_used_proxy": bool(proxy_used), "files": entries}
+        key = hmac_key if hmac_key is not None else os.environ.get("BRAND_TAKEDOWN_HMAC_KEY", "")
+        if key:
+            manifest["hmac_algorithm"] = "HMAC-SHA256"
+            manifest["hmac_sha256"] = compute_manifest_hmac(manifest, key)
         atomic_write_json(evidence_dir / "evidence-manifest.json", manifest)
         return manifest
 
 
-def verify_capture(case_dir: Path, capture_id: str) -> dict:
+def verify_capture(case_dir: Path, capture_id: str, *, hmac_key: str | None = None, require_hmac: bool = False) -> dict:
     data = load_case(case_dir)
     record = next((r for r in data["captures"] if r["capture_id"] == capture_id), None)
     if record is None:
@@ -487,13 +519,13 @@ def verify_capture(case_dir: Path, capture_id: str) -> dict:
     manifest_path = directory / "evidence-manifest.json"
     if hashlib.sha256(safe_path(manifest_path).read_bytes()).hexdigest() != record["manifest_sha256"]:
         raise ValueError("Manifest digest differs from the case's original seal")
-    return verify_manifest(directory)
+    return verify_manifest(directory, hmac_key=hmac_key, require_hmac=require_hmac)
 
 
-def refresh_case_manifest(case_dir: Path) -> dict:
+def refresh_case_manifest(case_dir: Path, *, hmac_key: str | None = None, require_hmac: bool = False) -> dict:
     # Legacy command is verification-only. Never reseal modified historical bytes.
     data = load_case(case_dir)
-    manifests = [verify_capture(case_dir, c["capture_id"]) for c in data["captures"]]
+    manifests = [verify_capture(case_dir, c["capture_id"], hmac_key=hmac_key, require_hmac=require_hmac) for c in data["captures"]]
     if not manifests:
         raise ValueError("No sealed captures")
     return {"verified": True, "captures": manifests}
@@ -574,11 +606,206 @@ def trigger_wayback_save(target_url: str, allowlist_domains=None) -> dict:
     raise ValueError("Automatic public archiving disabled: explicit external publication review required")
 
 
+_MAX_IMAGE_FILE_BYTES = 25 * 1024 * 1024
+_MAX_IMAGE_PIXELS = 4096 * 4096
+_MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+
+def _paeth(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    return a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+
+
+def _decode_png_luma(raw: bytes) -> tuple[int, int, list[int]]:
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Invalid PNG header")
+    pos = 8
+    width = height = bit_depth = color_type = 0
+    palette = b""
+    idat_chunks: list[bytes] = []
+    while pos + 12 <= len(raw):
+        length = struct.unpack(">I", raw[pos:pos + 4])[0]
+        ctype = raw[pos + 4:pos + 8]
+        data_end = pos + 8 + length
+        if data_end + 4 > len(raw):
+            raise ValueError("Truncated PNG chunk")
+        chunk_data = raw[pos + 8:data_end]
+        pos = data_end + 4
+        if ctype == b"IHDR" and len(chunk_data) == 13:
+            width, height, bit_depth, color_type, comp, flt, interlace = struct.unpack(">IIBBBBB", chunk_data)
+            if width < 1 or height < 1 or width * height > _MAX_IMAGE_PIXELS:
+                raise ValueError("PNG dimensions out of budget")
+            if bit_depth != 8 or comp != 0 or flt != 0 or interlace != 0:
+                raise ValueError("Only 8-bit non-interlaced PNG images are supported")
+        elif ctype == b"PLTE":
+            palette = chunk_data
+        elif ctype == b"IDAT":
+            idat_chunks.append(chunk_data)
+        elif ctype == b"IEND":
+            break
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+    if not width or not channels or not idat_chunks:
+        raise ValueError("Unsupported or incomplete PNG color/stream structure")
+    stride = width * channels
+    expected = height * (1 + stride)
+    if expected > _MAX_DECOMPRESSED_BYTES:
+        raise ValueError("Decompressed PNG exceeds memory budget")
+    decomp = zlib.decompressobj()
+    inflated = decomp.decompress(b"".join(idat_chunks), _MAX_DECOMPRESSED_BYTES + 1)
+    if len(inflated) != expected:
+        raise ValueError("Unexpected PNG image stream length")
+    luma: list[int] = []
+    prev_row = bytearray(stride)
+    for y in range(height):
+        row_start = y * (1 + stride)
+        ftype = inflated[row_start]
+        src = inflated[row_start + 1:row_start + 1 + stride]
+        cur = bytearray(stride)
+        for i in range(stride):
+            a = cur[i - channels] if i >= channels else 0
+            b = prev_row[i]
+            c = prev_row[i - channels] if i >= channels else 0
+            x = src[i]
+            if ftype == 0:
+                cur[i] = x
+            elif ftype == 1:
+                cur[i] = (x + a) & 0xFF
+            elif ftype == 2:
+                cur[i] = (x + b) & 0xFF
+            elif ftype == 3:
+                cur[i] = (x + ((a + b) >> 1)) & 0xFF
+            elif ftype == 4:
+                cur[i] = (x + _paeth(a, b, c)) & 0xFF
+            else:
+                raise ValueError(f"Unsupported PNG filter byte {ftype}")
+        prev_row = cur
+        for px in range(width):
+            idx = px * channels
+            if color_type in (0, 4):
+                luma.append(cur[idx])
+            elif color_type in (2, 6):
+                luma.append((299 * cur[idx] + 587 * cur[idx + 1] + 114 * cur[idx + 2]) // 1000)
+            else:
+                pi = cur[idx] * 3
+                if pi + 3 > len(palette):
+                    raise ValueError("PNG palette index out of range")
+                luma.append((299 * palette[pi] + 587 * palette[pi + 1] + 114 * palette[pi + 2]) // 1000)
+    return width, height, luma
+
+
+def _decode_bmp_luma(raw: bytes) -> tuple[int, int, list[int]]:
+    if len(raw) < 54 or not raw.startswith(b"BM"):
+        raise ValueError("Invalid BMP header")
+    offset, dib_size = struct.unpack("<II", raw[10:18])
+    if dib_size < 40 or len(raw) < 14 + dib_size:
+        raise ValueError("Unsupported BMP header")
+    width, raw_height, _, bpp, compression = struct.unpack("<iiHHI", raw[18:34])
+    top_down = raw_height < 0
+    height = abs(raw_height)
+    if width < 1 or height < 1 or width * height > _MAX_IMAGE_PIXELS or compression != 0 or bpp not in (8, 24, 32):
+        raise ValueError("Only uncompressed 8/24/32-bit BMP within dimension limits is supported")
+    row_stride = ((bpp * width + 31) // 32) * 4
+    if offset + row_stride * height > len(raw):
+        raise ValueError("Truncated BMP pixel array")
+    bytes_per_px = bpp // 8
+    luma: list[int] = []
+    for y in range(height):
+        src_y = y if top_down else (height - 1 - y)
+        row_base = offset + src_y * row_stride
+        for x in range(width):
+            p = row_base + x * bytes_per_px
+            if bytes_per_px == 1:
+                luma.append(raw[p])
+            else:
+                b_v, g_v, r_v = raw[p], raw[p + 1], raw[p + 2]
+                luma.append((299 * r_v + 587 * g_v + 114 * b_v) // 1000)
+    return width, height, luma
+
+
+def _decode_image_luma(path: Path) -> tuple[int, int, list[int]]:
+    clean_path = safe_path(path)
+    if not clean_path.is_file() or clean_path.stat().st_size > _MAX_IMAGE_FILE_BYTES:
+        raise ValueError("Image must be a regular file up to 25 MiB")
+    with clean_path.open("rb") as stream:
+        raw = stream.read(_MAX_IMAGE_FILE_BYTES + 1)
+    if not raw or len(raw) > _MAX_IMAGE_FILE_BYTES:
+        raise ValueError("Image is empty or exceeds size budget")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return _decode_png_luma(raw)
+    if raw.startswith(b"BM"):
+        return _decode_bmp_luma(raw)
+    if platform.system() == "Darwin" and Path("/usr/bin/sips").is_file():
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_png = Path(tmpdir) / "converted.png"
+            try:
+                subprocess.run(["/usr/bin/sips", "-s", "format", "png", str(clean_path), "--out", str(tmp_png)],
+                               check=True, capture_output=True, timeout=15)
+                if not tmp_png.is_file():
+                    raise ValueError("sips did not produce output PNG")
+                return _decode_png_luma(tmp_png.read_bytes())
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                raise ValueError(f"Unsupported or unreadable image format: {exc}") from exc
+    raise ValueError("Unsupported image encoding without native decoder; convert to PNG or BMP")
+
+
+def compute_image_dhash(path: Path) -> str:
+    """Compute a 64-bit horizontal difference hash (dHash) with zero external packages."""
+    width, height, luma = _decode_image_luma(path)
+    grid: list[list[int]] = []
+    for gy in range(8):
+        y0 = (gy * height) // 8
+        y1 = max(y0 + 1, ((gy + 1) * height) // 8)
+        row: list[int] = []
+        for gx in range(9):
+            x0 = (gx * width) // 9
+            x1 = max(x0 + 1, ((gx + 1) * width) // 9)
+            total = count = 0
+            for py in range(min(y0, height - 1), min(y1, height)):
+                base = py * width
+                for px in range(min(x0, width - 1), min(x1, width)):
+                    total += luma[base + px]
+                    count += 1
+            row.append(total // max(1, count))
+        grid.append(row)
+    bits = 0
+    for gy in range(8):
+        for gx in range(8):
+            bits = (bits << 1) | int(grid[gy][gx] < grid[gy][gx + 1])
+    return f"{bits:016x}"
+
+
+def dhash_hamming_distance(hash_a: str, hash_b: str) -> int:
+    if not re.fullmatch(r"[0-9a-fA-F]{16}", hash_a) or not re.fullmatch(r"[0-9a-fA-F]{16}", hash_b):
+        raise ValueError("Expected 16-hex-character dHash values")
+    return (int(hash_a, 16) ^ int(hash_b, 16)).bit_count()
+
+
+def compare_images_dhash(original_path: Path, suspect_path: Path, threshold: int = 10) -> dict:
+    """Compare two images by 64-bit dHash Hamming distance as a visual similarity lead."""
+    if not 0 <= threshold <= 64:
+        raise ValueError("dHash threshold must be between 0 and 64")
+    h1 = compute_image_dhash(original_path)
+    h2 = compute_image_dhash(suspect_path)
+    dist = dhash_hamming_distance(h1, h2)
+    return {
+        "algorithm": "dhash-64",
+        "original_dhash": h1,
+        "suspect_dhash": h2,
+        "hamming_distance": dist,
+        "max_bits": 64,
+        "threshold": threshold,
+        "candidate_similar": dist <= threshold,
+        "use": "VISUAL_SIMILARITY_HINT_NOT_PROOF_OF_INFRINGEMENT",
+        "trusted_as_instructions": False,
+    }
+
+
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY_PATH)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "refresh-manifest", "add-evidence", "archive-wayback"):
+    for name in ("run", "refresh-manifest", "add-evidence", "archive-wayback", "compare-images"):
         p = sub.add_parser(name)
         p.add_argument("--slug", required=True); p.add_argument("--case-dir", type=Path, required=True)
         if name in ("run", "add-evidence", "archive-wayback"):
@@ -587,6 +814,12 @@ def _main(argv=None) -> int:
             p.add_argument("--proxy"); p.add_argument("--referer")
         if name == "add-evidence":
             p.add_argument("--source", type=Path, required=True)
+        if name == "refresh-manifest":
+            p.add_argument("--require-hmac", action="store_true", help="Fail unless manifests contain valid BRAND_TAKEDOWN_HMAC_KEY HMAC-SHA256")
+        if name == "compare-images":
+            p.add_argument("--original", type=Path, required=True)
+            p.add_argument("--suspect", type=Path, required=True)
+            p.add_argument("--threshold", type=int, default=10)
     args = parser.parse_args(argv)
     brand_dir, _ = load_brand_profile(args.slug, args.registry)
     assert_case_brand(args.case_dir, brand_dir)
@@ -596,8 +829,10 @@ def _main(argv=None) -> int:
         result = add_evidence(args.case_dir, args.url, args.source)
     elif args.cmd == "archive-wayback":
         result = trigger_wayback_save(args.url)
+    elif args.cmd == "compare-images":
+        result = compare_images_dhash(args.original, args.suspect, threshold=args.threshold)
     else:
-        result = refresh_case_manifest(args.case_dir)
+        result = refresh_case_manifest(args.case_dir, require_hmac=args.require_hmac)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return int(result.get("capture_status") in ("FAILED", "PARTIAL"))
 

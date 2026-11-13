@@ -209,6 +209,134 @@ class TestRecon(Fixture):
         self.assertEqual(report["ip_intel"], ip_hint)
         self.assertTrue(recon.verify_capture(self.case, report["capture_id"])["files"])
 
+    @staticmethod
+    def _write_png(path, width: int, height: int, pixels_fn, *, color_type: int = 2, filter_type: int = 0) -> None:
+        import struct
+        import zlib
+
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+        bpp = {0: 1, 2: 3, 6: 4}[color_type]
+        raw_rows = bytearray()
+        for y in range(height):
+            row = bytearray()
+            for x in range(width):
+                r, g, b = pixels_fn(x, y, width, height)
+                if color_type == 0:
+                    row.append((r + g + b) // 3)
+                elif color_type == 2:
+                    row.extend((r, g, b))
+                else:
+                    row.extend((r, g, b, 255))
+            raw_rows.append(filter_type)
+            if filter_type == 0:
+                raw_rows.extend(row)
+            elif filter_type == 1:
+                for i, val in enumerate(row):
+                    left = row[i - bpp] if i >= bpp else 0
+                    raw_rows.append((val - left) & 0xFF)
+            else:
+                raise ValueError(filter_type)
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+        blob = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw_rows))) + chunk(b"IEND", b"")
+        path.write_bytes(blob)
+
+    @staticmethod
+    def _write_bmp24(path, width: int, height: int, pixels_fn) -> None:
+        import struct
+
+        stride = ((width * 3 + 3) // 4) * 4
+        pad = stride - width * 3
+        rows = bytearray()
+        for y in range(height - 1, -1, -1):
+            for x in range(width):
+                r, g, b = pixels_fn(x, y, width, height)
+                rows.extend((b, g, r))
+            rows.extend(b"\x00" * pad)
+        file_hdr = b"BM" + struct.pack("<IHHI", 54 + len(rows), 0, 0, 54)
+        dib_hdr = struct.pack("<IIIHHIIIIII", 40, width, height, 1, 24, 0, len(rows), 0, 0, 0, 0)
+        path.write_bytes(file_hdr + dib_hdr + bytes(rows))
+
+    def test_dhash_identical_and_scaled_png_vs_bmp_low_distance(self):
+        grad = lambda x, y, w, h: (int(255 * x / max(1, w - 1)), int(200 * x / max(1, w - 1)), int(180 * y / max(1, h - 1)))
+        orig_png = self.root / "orig.png"
+        scaled_rgba_sub = self.root / "scaled_rgba.png"
+        scaled_bmp = self.root / "scaled.bmp"
+        self._write_png(orig_png, 36, 24, grad, color_type=2, filter_type=0)
+        self._write_png(scaled_rgba_sub, 72, 48, grad, color_type=6, filter_type=1)
+        self._write_bmp24(scaled_bmp, 54, 36, grad)
+
+        res_png = recon.compare_images_dhash(orig_png, scaled_rgba_sub, threshold=10)
+        res_bmp = recon.compare_images_dhash(orig_png, scaled_bmp, threshold=10)
+        for result in (res_png, res_bmp):
+            self.assertEqual(result["algorithm"], "dhash-64")
+            self.assertEqual(result["max_bits"], 64)
+            self.assertLessEqual(result["hamming_distance"], 2)
+            self.assertTrue(result["candidate_similar"])
+            self.assertEqual(result["use"], "VISUAL_SIMILARITY_HINT_NOT_PROOF_OF_INFRINGEMENT")
+            self.assertFalse(result["trusted_as_instructions"])
+
+    def test_dhash_inverted_gradient_high_distance_and_bad_format_rejected(self):
+        left_to_right = lambda x, y, w, h: (int(255 * x / max(1, w - 1)), int(255 * x / max(1, w - 1)), int(255 * x / max(1, w - 1)))
+        right_to_left = lambda x, y, w, h: (255 - int(255 * x / max(1, w - 1)), 255 - int(255 * x / max(1, w - 1)), 255 - int(255 * x / max(1, w - 1)))
+        img_a = self.root / "ltr.png"
+        img_b = self.root / "rtl.bmp"
+        self._write_png(img_a, 36, 24, left_to_right, color_type=0, filter_type=0)
+        self._write_bmp24(img_b, 36, 24, right_to_left)
+
+        diff = recon.compare_images_dhash(img_a, img_b, threshold=10)
+        self.assertGreaterEqual(diff["hamming_distance"], 50)
+        self.assertFalse(diff["candidate_similar"])
+
+        bad = self.root / "corrupt.png"
+        bad.write_bytes(b"not-an-image")
+        with self.assertRaises(ValueError):
+            recon.compute_image_dhash(bad)
+
+        link = self.root / "sym.png"
+        link.symlink_to(img_a)
+        with self.assertRaises(ValueError):
+            recon.compute_image_dhash(link)
+
+    def test_manifest_hmac_sign_verify_and_tamper_detection(self):
+        import json
+
+        cap_dir = self.case / "evidence" / "cap_hmac"
+        cap_dir.mkdir(parents=True)
+        sample = cap_dir / "body.txt"
+        sample.write_text("captured sample payload", encoding="utf-8")
+
+        signed = recon.build_evidence_manifest(cap_dir, "https://suspect.example/item", ["93.184.216.34"], False, hmac_key="unit-test-hmac-key")
+        self.assertEqual(signed["hmac_algorithm"], "HMAC-SHA256")
+        self.assertTrue(signed.get("hmac_sha256"))
+
+        ok = recon.verify_manifest(cap_dir, hmac_key="unit-test-hmac-key", require_hmac=True)
+        self.assertEqual(ok["hmac_algorithm"], "HMAC-SHA256")
+        self.assertEqual(ok["hmac_sha256"], signed["hmac_sha256"])
+
+        with self.assertRaises(ValueError):
+            recon.verify_manifest(cap_dir, hmac_key="wrong-key")
+        with self.assertRaises(ValueError):
+            recon.verify_manifest(cap_dir, hmac_key="")
+
+        manifest_path = cap_dir / "evidence-manifest.json"
+        tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
+        tampered["target_url"] = "https://other.example/tampered"
+        manifest_path.write_text(json.dumps(tampered, indent=2) + "\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            recon.verify_manifest(cap_dir, hmac_key="unit-test-hmac-key")
+
+        unsigned_dir = self.case / "evidence" / "cap_unsigned"
+        unsigned_dir.mkdir(parents=True)
+        (unsigned_dir / "body.txt").write_text("unsigned payload", encoding="utf-8")
+        unsigned = recon.build_evidence_manifest(unsigned_dir, "https://suspect.example/unsigned", [], False, hmac_key="")
+        self.assertNotIn("hmac_sha256", unsigned)
+        unsigned_verified = recon.verify_manifest(unsigned_dir, hmac_key="", require_hmac=False)
+        self.assertNotIn("hmac_sha256", unsigned_verified)
+        with self.assertRaises(ValueError):
+            recon.verify_manifest(unsigned_dir, hmac_key="", require_hmac=True)
+
 
 class TestRadar(Fixture):
     def test_failure_not_successful_empty_scan(self):

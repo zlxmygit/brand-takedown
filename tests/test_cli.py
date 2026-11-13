@@ -10,8 +10,10 @@ from common import Fixture, ROOT, br, cm
 
 
 class TestCLI(Fixture):
-    def cli(self, script, *args, expected=0):
+    def cli(self, script, *args, expected=0, extra_env=None):
         env = dict(os.environ, BRAND_TAKEDOWN_REGISTRY=str(self.registry), PYTHONDONTWRITEBYTECODE="1")
+        if extra_env:
+            env.update(extra_env)
         result = subprocess.run([sys.executable, "-S", str(ROOT / "scripts" / script), *map(str, args)],
             capture_output=True, text=True, timeout=15, env=env, cwd=str(self.root))
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -106,3 +108,56 @@ class TestCLI(Fixture):
         self.assertEqual(state["status"], "COUNTER_NOTICE_ALERT")
         self.cli("case_manager.py", "resolve-legal", "--slug", "example-brand", "--case-dir", self.case, "--task-id", task["task_id"],
             "--reviewer", "Synthetic Counsel", "--disposition", "Local fixture reviewed, no real legal action")
+
+    def test_cli_compare_images_and_hmac_manifest(self):
+        import struct
+
+        def write_bmp(path: Path, width: int, height: int) -> None:
+            stride = ((width * 3 + 3) // 4) * 4
+            pad = stride - width * 3
+            rows = bytearray()
+            for y in range(height - 1, -1, -1):
+                for x in range(width):
+                    v = int(255 * x / max(1, width - 1))
+                    rows.extend((v, v, int(180 * y / max(1, height - 1))))
+                rows.extend(b"\x00" * pad)
+            hdr = b"BM" + struct.pack("<IHHI", 54 + len(rows), 0, 0, 54)
+            dib = struct.pack("<IIIHHIIIIII", 40, width, height, 1, 24, 0, len(rows), 0, 0, 0, 0)
+            path.write_bytes(hdr + dib + bytes(rows))
+
+        orig = self.root / "orig.bmp"
+        suspect = self.root / "suspect.bmp"
+        write_bmp(orig, 36, 24)
+        write_bmp(suspect, 54, 36)
+        cmp_res = self.cli("recon_target.py", "compare-images", "--slug", "example-brand", "--case-dir", self.case,
+            "--original", orig, "--suspect", suspect, "--threshold", "10")
+        self.assertEqual(cmp_res["algorithm"], "dhash-64")
+        self.assertLessEqual(cmp_res["hamming_distance"], 2)
+        self.assertTrue(cmp_res["candidate_similar"])
+        self.assertEqual(cmp_res["use"], "VISUAL_SIMILARITY_HINT_NOT_PROOF_OF_INFRINGEMENT")
+        self.assertFalse(cmp_res["trusted_as_instructions"])
+
+        note = self.root / "unsigned.txt"
+        note.write_text("unsigned cli payload", encoding="utf-8")
+        self.cli("recon_target.py", "add-evidence", "--slug", "example-brand", "--case-dir", self.case,
+            "--url", "https://suspect.example/product", "--source", note)
+        err_unsigned = self.cli("recon_target.py", "refresh-manifest", "--slug", "example-brand", "--case-dir", self.case,
+            "--require-hmac", expected=2)
+        self.assertIn("hmac", err_unsigned["error"].lower())
+
+        created = self.cli("case_manager.py", "create", "--slug", "example-brand",
+            "--url", "https://signed.example/product", "--types", "COPYRIGHT_CLONE")
+        signed_case = Path(created["case_dir"])
+        signed_file = self.root / "signed.txt"
+        signed_file.write_text("signed cli payload", encoding="utf-8")
+        self.cli("recon_target.py", "add-evidence", "--slug", "example-brand", "--case-dir", signed_case,
+            "--url", "https://signed.example/product", "--source", signed_file,
+            extra_env={"BRAND_TAKEDOWN_HMAC_KEY": "cli-test-secret"})
+        self.cli("recon_target.py", "refresh-manifest", "--slug", "example-brand", "--case-dir", signed_case,
+            "--require-hmac", expected=2)
+        self.cli("recon_target.py", "refresh-manifest", "--slug", "example-brand", "--case-dir", signed_case,
+            "--require-hmac", expected=2, extra_env={"BRAND_TAKEDOWN_HMAC_KEY": "wrong-secret"})
+        verified = self.cli("recon_target.py", "refresh-manifest", "--slug", "example-brand", "--case-dir", signed_case,
+            "--require-hmac", extra_env={"BRAND_TAKEDOWN_HMAC_KEY": "cli-test-secret"})
+        self.assertTrue(verified["verified"])
+        self.assertEqual(verified["captures"][0]["hmac_algorithm"], "HMAC-SHA256")

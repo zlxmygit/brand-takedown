@@ -1,5 +1,10 @@
 # 更新日志
 
+## v1.4.0
+
+- 在 `recon_target.py` 新增零依赖 64-bit 差异感知哈希 (`dHash`) 图片比对能力与 `compare-images` 子命令：支持纯标准库解码 8-bit PNG（过滤类型 `0..4`、色彩类型 `0/2/3/4/6`）与未压缩 `8/24/32`-bit BMP（macOS 可回退至 `/usr/bin/sips`），输出汉明距离与 `VISUAL_SIMILARITY_HINT_NOT_PROOF_OF_INFRINGEMENT` 辅助复核线索。
+- 新增可选本地 `BRAND_TAKEDOWN_HMAC_KEY` 环境变量驱动的 `HMAC-SHA256` 证据清单签名与校验机制，以及 `refresh-manifest --require-hmac` 强制验签开关（明确区分本地完整性校验与外部可信时间戳 TSA）。
+
 ## v1.3.0
 
 - 升级 `ct_radar.py`：新增零依赖离线拼写抢注与仿冒变体生成器（漏字母、邻位换位、字符重复、连字符增删、ASCII 同形视觉替换与商业组合词前缀/后缀），严格排除品牌白名单与内部保留域。

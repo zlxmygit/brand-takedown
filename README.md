@@ -85,6 +85,15 @@ python3 scripts/recon_target.py refresh-manifest \
 
 `refresh-manifest` 比对原始清单，文件发生变化时会报错。补充材料会另建快照，原快照保持不变。
 
+如需为证据清单附加本地防篡改校验，可在抓取或补充材料前设置 `BRAND_TAKEDOWN_HMAC_KEY`，随后使用 `--require-hmac` 强制校验证据清单的 `HMAC-SHA256` 签名（仅用于本地密钥完整性验证，不等同于第三方可信时间戳机构 TSA 认证）；如需初筛盗图或页面视觉雷同，可执行零依赖 `compare-images` 计算 64-bit `dHash` 汉明距离：
+
+```bash
+BRAND_TAKEDOWN_HMAC_KEY="replace-with-local-secret" python3 scripts/recon_target.py refresh-manifest \
+  --slug example-brand --case-dir "$CASE_DIR" --require-hmac
+python3 scripts/recon_target.py compare-images --slug example-brand --case-dir "$CASE_DIR" \
+  --original "$HOME/brand/original.png" --suspect "$HOME/evidence/suspect.png" --threshold 10
+```
+
 ### 3. 整理投诉材料
 
 先从服务商官网核对投诉入口，再登记通道。以下名称和邮箱需要替换为核实后的信息：
