@@ -164,7 +164,7 @@ python3 scripts/ct_radar.py --slug example-brand
 
 这三个命令分别检查网址、列出待办和查询域名线索。待办包括催办、补件、升级复核和反通知处理。域名线索会保留到审核人分类处理。
 
-巡检命令可附加 `--check-rdap`，同时查询域名注册状态。结果中的 `clienthold` 和 `serverhold` 可用于核对域名是否被暂停解析。
+巡检命令可附加 `--check-rdap`，同时查询域名注册状态。结果中的 `clienthold` 和 `serverhold` 可用于核对域名是否被暂停解析。`ct_radar.py` 可附加 `--include-lookalikes` 离线生成拼写漏字、邻位互换、连字符及前缀组合变体，并通过 HTTPS DoH 对公网 `A` 与 `MX` 记录做活跃快筛（识别仅配置邮箱的钓鱼域，仍需人工分类复核）。
 
 使用 `update-channel` 更新工单，用 `escalate` 准备下一轮跟进。收到反通知后，使用 `counter-notice` 保存来源邮件和收件时间，再按 [反通知处理](references/escalation-and-counter-notice.md) 核对后续事项。各命令的参数可通过 `--help` 查看。
 

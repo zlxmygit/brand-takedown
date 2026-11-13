@@ -1,5 +1,10 @@
 # 更新日志
 
+## v1.3.0
+
+- 升级 `ct_radar.py`：新增零依赖离线拼写抢注与仿冒变体生成器（漏字母、邻位换位、字符重复、连字符增删、ASCII 同形视觉替换与商业组合词前缀/后缀），严格排除品牌白名单与内部保留域。
+- 新增基于安全 HTTPS DoH 的受控域名 `A`/`MX` 存活快筛 (`--include-lookalikes` / `--lookalike-limit`)，捕捉尚未申请 SSL 证书或仅配置仿冒发信 `MX` 记录的活跃钓鱼域，沿用 `PENDING_REVIEW` -> 人工 `triage` 状态机。
+
 ## v1.2.0
 
 - 新增 **Lumen Database** 公共档案防隐私暴露与授权代理署名护栏：`profile.schema.json` 与 `brand_registry.py` 新增可选 `public_filing_agent` 代理署名人/商用邮政地址配置及格式校验。

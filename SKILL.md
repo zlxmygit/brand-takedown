@@ -128,7 +128,9 @@ perjury or use another channel as a guaranteed procedural bypass.
 ## 5. Radar and regulatory matters
 
 [ct_radar.py](./scripts/ct_radar.py) returns pending candidates until a named reviewer
-triages them. Query failures are explicit; a CT name is neither a new registration
+triages them; optionally add `--include-lookalikes` for bounded zero-dep typo/homoglyph/combosquat
+permutations screened by HTTPS DoH `A`/`MX` resolution (detecting mail-only phishing hosts).
+Query failures are explicit; a CT name or live DNS lead is neither a new registration
 nor proof of wrongdoing. Confirm the facts before creating a case.
 Read [customs-and-safety.md](./references/customs-and-safety.md) before a regulatory
 filing. Use `REGULATORY_FILING`, never commercial SLA threats against regulators.

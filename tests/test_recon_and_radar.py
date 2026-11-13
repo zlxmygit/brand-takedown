@@ -240,3 +240,46 @@ class TestRadar(Fixture):
     def test_cross_brand_profile_rejected(self):
         p = copy.deepcopy(self.profile); p["brand_id"] = "another"
         with self.assertRaises(ValueError): ct.run_radar_scan(self.brand, p)
+
+    def test_generate_lookalike_domains_covers_mutations_and_respects_allowlist(self):
+        variants = ct.generate_lookalike_domains(
+            ["brand.example"], ["brand.example", "brand-shop.example"], max_variants=80
+        )
+        domains = {item["domain"]: item["mutation_kind"] for item in variants}
+        self.assertIn("rand.example", domains)  # omission
+        self.assertIn("barnd.example", domains)  # transposition
+        self.assertIn("bbrand.example", domains)  # repetition
+        self.assertIn("b-rand.example", domains)  # hyphenation
+        self.assertIn("br4nd.example", domains)  # homoglyph_ascii
+        self.assertIn("official-brand.example", domains)  # combosquatting
+        self.assertNotIn("brand.example", domains)
+        self.assertNotIn("brand-shop.example", domains)
+
+    def test_probe_domain_dns_signals_captures_mx_only_and_ignores_private_ips(self):
+        a_resp = FetchResult("https://dns.google/resolve?name=bad.example&type=A", 200, {},
+                             json.dumps({"Status": 0, "Answer": [{"type": 1, "data": "127.0.0.1"}]}).encode(), "8.8.8.8", ())
+        mx_resp = FetchResult("https://dns.google/resolve?name=bad.example&type=MX", 200, {},
+                              json.dumps({"Status": 0, "Answer": [{"type": 15, "data": "10 mx.bad.example."}]}).encode(), "8.8.8.8", ())
+        with patch.object(ct, "fetch", side_effect=[a_resp, mx_resp]):
+            res = ct.probe_domain_dns_signals("bad.example")
+        self.assertEqual(res["a_records"], [])
+        self.assertEqual(res["mx_records"], ["mx.bad.example"])
+        self.assertTrue(res["live_dns"])
+        self.assertFalse(res["authoritative"])
+
+    def test_lookalike_scan_persists_live_candidates_and_preserves_triage(self):
+        def fake_probe(domain):
+            if domain == "br4nd.example":
+                return {"domain": domain, "a_records": [], "mx_records": ["mx.br4nd.example"],
+                        "live_dns": True, "errors": [], "authoritative": False, "use": "UNVERIFIED_DNS_LEAD"}
+            return {"domain": domain, "a_records": [], "mx_records": [], "live_dns": False,
+                    "errors": [], "authoritative": False, "use": "UNVERIFIED_DNS_LEAD"}
+
+        with patch.object(ct, "_fetch_crt_json", return_value=[]), patch.object(ct, "probe_domain_dns_signals", side_effect=fake_probe):
+            res = ct.run_radar_scan(self.brand, self.profile, include_lookalikes=True, lookalike_limit=40)
+            self.assertEqual(res["status"], "OK")
+            self.assertEqual(res["pending_domains"], ["br4nd.example"])
+            self.assertEqual(res["lookalike_summary"]["live_count"], 1)
+            ct.triage(self.brand, "br4nd.example", "REJECTED", "Human Reviewer", "Unrelated third-party mail host")
+            res2 = ct.run_radar_scan(self.brand, self.profile, include_lookalikes=True, lookalike_limit=40)
+            self.assertEqual(res2["pending_count"], 0)

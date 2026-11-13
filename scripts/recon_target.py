@@ -11,7 +11,7 @@ import sys
 import uuid
 from urllib.parse import quote
 
-from brand_registry import (DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
+from brand_registry import (COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES, DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
                             normalize_hostname, profile_allowlist, utc_now)
 from case_manager import assert_case_brand, case_profile, load_case, mutate_case
 from safe_http import fetch, resolve_addresses
@@ -21,10 +21,6 @@ _atomic_write_json = atomic_write_json
 _utc_now_iso = utc_now
 EXCLUDED_MANIFEST_FILES = {"evidence-manifest.json"}
 _EMAIL_RE = re.compile(r"\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b")
-_COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES = {
-    "co.uk", "org.uk", "me.uk", "com.au", "net.au", "org.au",
-    "com.cn", "net.cn", "org.cn", "com.br", "com.hk", "co.jp",
-}
 
 
 def _dedup_preserve(items: list[str]) -> list[str]:
@@ -220,7 +216,7 @@ def domain_rdap_candidates(host: str) -> list[str]:
     candidates: list[str] = []
     for idx in range(0, max(1, len(labels) - 1)):
         sub = ".".join(labels[idx:])
-        if "." in sub and sub not in _COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES:
+        if "." in sub and sub not in COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES:
             candidates.append(sub)
     return candidates
 
