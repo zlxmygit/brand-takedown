@@ -31,3 +31,7 @@ packet.json
 *.zip
 *.lock
 .write-*
+.psl-update.lock
+.psl-update.json
+*.sqlite3
+*.sqlite3-*

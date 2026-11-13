@@ -14,6 +14,7 @@ from brand_registry import (DEFAULT_REGISTRY_PATH, is_allowlisted_url,
                             load_brand_profile, normalize_hostname, profile_allowlist, profile_from_dir, utc_now)
 from safe_http import fetch
 from domain_names import registrable_domain
+from radar_archive import recover_pruned_state, suppressed_domains, archive_reviewed, export_batch, restore_candidate
 from dns_json import dns_answers
 from storage import atomic_write_json, locked, read_json, safe_path
 
@@ -232,12 +233,16 @@ def run_radar_scan(brand_dir: Path, profile: dict, *, include_lookalikes: bool =
             raise ValueError("Legacy radar state requires reviewed migration; refusing silent reset")
         if not isinstance(state.get("candidates"), dict):
             raise ValueError("Invalid radar candidates")
+        recovered_count = recover_pruned_state(brand_dir, state)
+        suppressed = suppressed_domains(brand_dir, set(candidates) | {x["domain"] for x in live_lookalikes})
         now = utc_now()
         admitted = deferred = 0
         def entry_for(host):
             nonlocal admitted, deferred
             if host in state["candidates"]:
                 return state["candidates"][host]
+            if host in suppressed:
+                return None
             if len(state["candidates"]) >= MAX_RADAR_CANDIDATES or admitted >= MAX_NEW_PER_SCAN:
                 deferred += 1
                 return None
@@ -275,7 +280,7 @@ def run_radar_scan(brand_dir: Path, profile: dict, *, include_lookalikes: bool =
         "errors": errors,
         "successful_keywords": successes,
         "pending_domains": pending,
-        "pending_count": len(pending),
+        "pending_count": len(pending), "recovered_archive_count": recovered_count,
         "warning": "CT names, lookalike permutations and DNS A/MX leads are unverified signals, not newly registered or proven infringing domains",
     }
     if include_lookalikes:
@@ -307,14 +312,25 @@ def _main(argv=None) -> int:
     parser.add_argument("--slug", required=True)
     parser.add_argument("--include-lookalikes", action="store_true", help="Also generate bounded lookalike permutations and check DoH DNS A/MX signals")
     parser.add_argument("--lookalike-limit", type=int, default=20, help="Maximum lookalike permutations to screen per run (1-60)")
+    parser.add_argument("--archive-reviewed", action="store_true")
+    parser.add_argument("--archive-limit", type=int, default=1000)
+    parser.add_argument("--export-batch")
+    parser.add_argument("--restore-domain")
     parser.add_argument("--triage-domain"); parser.add_argument("--decision"); parser.add_argument("--reviewer"); parser.add_argument("--rationale")
     args = parser.parse_args(argv)
     directory, profile = load_brand_profile(args.slug, args.registry)
-    result = (
-        triage(directory, args.triage_domain, args.decision or "", args.reviewer or "", args.rationale or "")
-        if args.triage_domain
-        else run_radar_scan(directory, profile, include_lookalikes=args.include_lookalikes, lookalike_limit=args.lookalike_limit)
-    )
+    if sum(bool(x) for x in (args.archive_reviewed, args.export_batch, args.restore_domain, args.triage_domain)) > 1:
+        raise ValueError("Select one radar operation")
+    if args.archive_reviewed:
+        result = archive_reviewed(directory, args.reviewer or "", args.archive_limit)
+    elif args.export_batch:
+        result = export_batch(directory, args.export_batch)
+    elif args.restore_domain:
+        result = restore_candidate(directory, args.restore_domain, args.reviewer or "", args.rationale or "")
+    elif args.triage_domain:
+        result = triage(directory, args.triage_domain, args.decision or "", args.reviewer or "", args.rationale or "")
+    else:
+        result = run_radar_scan(directory, profile, include_lookalikes=args.include_lookalikes, lookalike_limit=args.lookalike_limit)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return int(result.get("status") in ("FAILED", "PARTIAL"))
 

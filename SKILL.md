@@ -117,6 +117,10 @@ Only after actual user-authorized transmission, record `case_manager.py submit`
 with the approved packet ID, actual sent time and provider/mail receipt reference.
 A prepared draft is not SUBMITTED, and a planned escalation does not reset a clock.
 
+For subsequent transmissions, bind `submission_kind` to INITIAL, SUPPLEMENT or
+ESCALATION. Supplements require NEED_MORE_INFO and retain the current tier/ticket.
+Optional fingerprint analysis failures do not invalidate a successfully saved capture.
+
 ## 4. Feedback, liveness and legal review
 
 Use [check_liveness.py](./scripts/check_liveness.py) (optionally with `--check-rdap`
@@ -132,6 +136,14 @@ and provider receipt times when known. A human reviewer must explicitly resolve 
 legal task with a documented disposition. Do not treat address doubts as proven
 perjury or use another channel as a guaranteed procedural bypass.
 
+An open counter-notice pauses normal operations on its channel, including preparation,
+approval, export and receipts. A COUNTER_NOTICE_RESPONSE requires the open task ID,
+matching source reference and reviewed response text. Resolve every open task on that
+channel before resuming. Old packets must be regenerated after legal review changes.
+Use `review-liveness` with sealed evidence and a named reviewer to record DOWN/ACTIVE.
+Network observations never clear a reviewed-down state or an unreviewed recovery alert.
+See [followup-workflows.md](./references/followup-workflows.md) for these operations.
+
 ## 5. Radar and regulatory matters
 
 [ct_radar.py](./scripts/ct_radar.py) returns pending candidates until a named reviewer
@@ -141,6 +153,10 @@ Query failures are explicit; a CT name or live DNS lead is neither a new registr
 nor proof of wrongdoing. Confirm the facts before creating a case.
 Read [customs-and-safety.md](./references/customs-and-safety.md) before a regulatory
 filing. Use `REGULATORY_FILING`, never commercial SLA threats against regulators.
+
+Archive reviewed radar entries with `--archive-reviewed`; use `--restore-domain`
+only for an explicit new review. Keep the SQLite archive with the brand backup.
+Public suffix updates are pinned and verified; see [maintenance.md](./references/maintenance.md).
 
 ## Completion criteria
 

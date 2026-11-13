@@ -1,11 +1,12 @@
 # Public Suffix List
 
 `public_suffix_list.dat.gz` contains the ICANN and PRIVATE rules from upstream commit
-`823beb1425def931c8b0b170a6bc33b424c3f9b0` (2025-05-12). Comments were removed, rules
+`aa004f90b4cbe1c54ea96375622eca83d76059f0` (2026-11-12). Comments were removed, rules
 sorted within each section, and the text compressed with gzip. The snapshot is
-loaded locally; scans do not download or update rules.
+loaded locally. Maintenance updates use scripts/update_psl.py with a pinned commit,
+source verification and checksummed rollback backups.
 
-Source: https://raw.githubusercontent.com/publicsuffix/list/823beb1425def931c8b0b170a6bc33b424c3f9b0/public_suffix_list.dat
+Source: https://raw.githubusercontent.com/publicsuffix/list/aa004f90b4cbe1c54ea96375622eca83d76059f0/public_suffix_list.dat
 
 The Public Suffix List is licensed under MPL-2.0. The application code retains its MIT license.
 
