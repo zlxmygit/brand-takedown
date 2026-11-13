@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.4.1
+
+- 修复巡检中断、网页解析耗时和代理邮箱导出问题。
+- 修正域名雷达、DNS/RDAP 校验、图片透明度与调色板处理。
+- 将 HMAC 策略贯穿材料审批和导出，修正权利类型及属地匹配。
+- 补充回归测试，安装包解压测试通过后再发布。
+
 ## v1.4.0
 
 - 在 `recon_target.py` 新增零依赖 64-bit 差异感知哈希 (`dHash`) 图片比对能力与 `compare-images` 子命令：支持纯标准库解码 8-bit PNG（过滤类型 `0..4`、色彩类型 `0/2/3/4/6`）与未压缩 `8/24/32`-bit BMP（macOS 可回退至 `/usr/bin/sips`），输出汉明距离与 `VISUAL_SIMILARITY_HINT_NOT_PROOF_OF_INFRINGEMENT` 辅助复核线索。

@@ -15,6 +15,9 @@ import tempfile
 import threading
 
 
+MAX_STATE_BYTES = 16 * 1024 * 1024
+
+
 class ConflictError(ValueError):
     """A stale revision or conflicting identity was supplied."""
 
@@ -46,7 +49,7 @@ def private_dir(path: Path) -> Path:
 
 def read_json(path: Path) -> dict:
     path = safe_path(path)
-    if path.stat().st_size > 16 * 1024 * 1024:
+    if path.stat().st_size > MAX_STATE_BYTES:
         raise ValueError("State file exceeds 16 MiB")
     with path.open(encoding="utf-8") as stream:
         value = json.load(stream)
@@ -103,6 +106,9 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
             os.unlink(tmp)
 
 
+
 def atomic_write_json(path: Path, payload: dict) -> None:
-    atomic_write_bytes(path, (json.dumps(payload, ensure_ascii=False, indent=2,
-                                       allow_nan=False) + "\n").encode("utf-8"))
+    content = (json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    if len(content) > MAX_STATE_BYTES:
+        raise ValueError("State write exceeds 16 MiB; previous file preserved")
+    atomic_write_bytes(path, content)

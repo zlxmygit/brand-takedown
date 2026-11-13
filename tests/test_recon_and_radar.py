@@ -170,6 +170,7 @@ class TestRecon(Fixture):
         )
         ip_doc = {
             "objectClassName": "ip network",
+            "startAddress": "93.184.216.0", "endAddress": "93.184.216.255", "ipVersion": "v4",
             "handle": "NET-93-184-216-0-1",
             "name": "EDGECAST-NETBLK",
             "country": "US",
@@ -178,7 +179,7 @@ class TestRecon(Fixture):
         }
         ip_resp = FetchResult("https://rdap.ripe.example/ip/93.184.216.34", 200, {}, json.dumps(ip_doc).encode(), "93.184.216.34", ())
         doh_resp = FetchResult("https://dns.google/resolve?name=34.216.184.93.origin.asn.cymru.com&type=TXT", 200, {},
-                               json.dumps({"Status": 0, "Answer": [{"type": 16, "data": "15133 | 93.184.216.0/24 | US | arin | 2008-06-02"}]}).encode(), "8.8.8.8", ())
+                               json.dumps({"Status": 0, "Answer": [{"name": "34.216.184.93.origin.asn.cymru.com.", "type": 16, "data": "15133 | 93.184.216.0/24 | US | arin | 2008-06-02"}]}).encode(), "8.8.8.8", ())
         with patch.object(recon, "fetch", side_effect=[v4_bootstrap, ip_resp, doh_resp]):
             res = recon.query_ip_rdap("93.184.216.34")
         self.assertTrue(res["ok"])
@@ -385,9 +386,9 @@ class TestRadar(Fixture):
 
     def test_probe_domain_dns_signals_captures_mx_only_and_ignores_private_ips(self):
         a_resp = FetchResult("https://dns.google/resolve?name=bad.example&type=A", 200, {},
-                             json.dumps({"Status": 0, "Answer": [{"type": 1, "data": "127.0.0.1"}]}).encode(), "8.8.8.8", ())
+                             json.dumps({"Status": 0, "Answer": [{"name": "bad.example.", "type": 1, "data": "127.0.0.1"}]}).encode(), "8.8.8.8", ())
         mx_resp = FetchResult("https://dns.google/resolve?name=bad.example&type=MX", 200, {},
-                              json.dumps({"Status": 0, "Answer": [{"type": 15, "data": "10 mx.bad.example."}]}).encode(), "8.8.8.8", ())
+                              json.dumps({"Status": 0, "Answer": [{"name": "bad.example.", "type": 15, "data": "10 mx.bad.example."}]}).encode(), "8.8.8.8", ())
         with patch.object(ct, "fetch", side_effect=[a_resp, mx_resp]):
             res = ct.probe_domain_dns_signals("bad.example")
         self.assertEqual(res["a_records"], [])

@@ -77,7 +77,9 @@ hosting leads (`HOSTING_HINT_NOT_PROOF_OF_ATTRIBUTION`), never attribution proof
 `CAPTURED` means bytes were obtained, not that the allegation is proven.
 `FAILED`/`PARTIAL` captures cannot support packet claims. A modified/missing file or
 manifest is an integrity error; `refresh-manifest` verifies and never re-signs it.
-When `BRAND_TAKEDOWN_HMAC_KEY` is set, new captures include a local `HMAC-SHA256`
+Set profile `require_evidence_hmac: true` or `BRAND_TAKEDOWN_REQUIRE_HMAC=1` to require
+HMAC throughout capture, packet approval, export and receipt recording. Supply the key
+through the runtime environment. When `BRAND_TAKEDOWN_HMAC_KEY` is set, new captures include a local `HMAC-SHA256`
 manifest signature and `refresh-manifest --require-hmac` enforces verification
 (local integrity check only, not an external trusted timestamp authority). Use
 `compare-images` for zero-dependency 64-bit `dHash` visual similarity leads

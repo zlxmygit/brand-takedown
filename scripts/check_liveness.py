@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from html.parser import HTMLParser
+from html_tools import VisibleText, visible_html_text
 import json
 from pathlib import Path
 import sys
@@ -15,31 +15,8 @@ from safe_http import fetch
 PLATFORM_TAKEDOWN_BANNERS = ("sorry, this shop is currently unavailable", "this store is unavailable", "this account has been suspended", "website has been suspended", "store has been closed")
 
 
-class _VisibleText(HTMLParser):
-    def __init__(self):
-        super().__init__(); self.stack = []; self.parts = []
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        style = attrs.get("style", "").replace(" ", "").lower()
-        hidden = (tag in ("script", "style", "template", "noscript") or "hidden" in attrs
-                  or attrs.get("aria-hidden") == "true" or "display:none" in style or "visibility:hidden" in style)
-        if tag not in ("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"):
-            self.stack.append((tag, hidden or any(h for _, h in self.stack)))
-
-    def handle_endtag(self, tag):
-        for i in range(len(self.stack) - 1, -1, -1):
-            if self.stack[i][0] == tag:
-                del self.stack[i:]; break
-
-    def handle_data(self, data):
-        if not any(hidden for _, hidden in self.stack):
-            self.parts.append(data)
-
-
-def _visible_html_text(html: str) -> str:
-    parser = _VisibleText(); parser.feed(html)
-    return " ".join(parser.parts).lower()
+_VisibleText = VisibleText
+_visible_html_text = visible_html_text
 
 
 def classify_liveness(http_status: int, html: str, dns_ips: list[str], whois_statuses: list[str],
@@ -103,7 +80,7 @@ def probe_case(case_dir: Path, brand_keywords: list[str], proxy=None, referer=No
                 rdap_statuses, brand_keywords, data["infrastructure_baseline"].get("ips", []), dns.get("dns_query_ok", False))
             results.append({"target_url": url, "final_url": response.url, "http_status": response.status,
                             "checked_at_utc": utc_now(), **rdap_meta, **observation})
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, TypeError, AttributeError, RecursionError) as exc:
             results.append({"target_url": url, "checked_at_utc": utc_now(), "verdict": "UNKNOWN_REQUIRES_REVIEW",
                             **rdap_meta, "error": str(exc)})
     active = any(r["verdict"] in ("CONTENT_PRESENT", "CONTENT_CHANGED_REVIEW") for r in results)
@@ -125,7 +102,7 @@ def patrol(brand_dir: Path, keywords: list[str], *, check_rdap: bool = False) ->
             continue
         try:
             results.append(probe_case(child, keywords, check_rdap=check_rdap))
-        except (ValueError, OSError, KeyError) as exc:
+        except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as exc:
             errors.append({"case_dir": str(child), "error": str(exc)})
     failed_targets = sum(bool(t.get("error")) for result in results for t in result["targets"])
     return {"results": results, "errors": errors, "probed_count": len(results), "failed_target_count": failed_targets}
@@ -155,5 +132,5 @@ def _main(argv=None) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(_main())
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError, RecursionError) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr); sys.exit(2)

@@ -131,8 +131,11 @@ def _validate_request(case_dir: Path, request: dict) -> tuple[dict, dict, dict]:
             if type(index) is not int or not 0 <= index < len(rights):
                 raise ValueError("Claim needs a valid right_index")
             right = rights[index]
+            if kind == "DESIGN" and right.get("type") != "design":
+                raise ValueError("DESIGN claims require a design right, not a utility patent")
             if kind != "COPYRIGHT":
-                if right.get("jurisdiction") != request["jurisdiction"]:
+                territory = "CN" if request["jurisdiction"] == "CN_EXPORT" and route == "REGULATORY_FILING" else request["jurisdiction"]
+                if right.get("jurisdiction") != territory:
                     raise ValueError("Right territory differs from selected jurisdiction")
                 if right.get("status", "registered") == "pending":
                     raise ValueError("Pending registration cannot support a registered-right notice")
@@ -227,6 +230,9 @@ def _verify_packet(case_dir: Path, packet_id: str) -> dict:
     case, profile, channel = _validate_request(case_dir, packet["request"])
     if packet["case_id"] != case["case_id"] or packet["brand_id"] != profile["brand_id"] or packet["endpoint"] != channel["target_endpoint"]:
         raise ValueError("Packet context changed")
+    signer, _, signatory_mode = _select_signatory(profile, packet["request"])
+    if packet.get("signatory_mode") != signatory_mode or packet.get("from_addr") != signer["legal_email"]:
+        raise ValueError("Packet signer differs from configured identity")
     if packet["profile_sha256"] != _digest((safe_path(case_dir).parent.parent / "profile.json").read_bytes()):
         raise ValueError("Brand profile changed; regenerate and reapprove packet")
     if _digest(safe_path(directory / "notice.txt").read_bytes()) != packet["body_sha256"]:

@@ -5,6 +5,7 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
@@ -28,8 +29,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Verify exact locally tested sources
-        run: >-
-          python -c 'import hashlib,json,pathlib; d=json.loads(pathlib.Path("docs/source-checksums.json").read_text()); bad=[p for p,h in d["files"].items() if hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()!=h]; assert not bad,bad; print("Verified",len(d["files"]),"source files")'
+        run: python scripts/verify_source.py
       - name: Compile and diagnose
         run: |
           python -m compileall -q scripts tests
@@ -52,3 +52,8 @@ jobs:
           python scripts/package_skill.py --out "$RUNNER_TEMP/brand-takedown-a.zip"
           python scripts/package_skill.py --out "$RUNNER_TEMP/brand-takedown-b.zip"
           cmp "$RUNNER_TEMP/brand-takedown-a.zip" "$RUNNER_TEMP/brand-takedown-b.zip"
+          python -m zipfile -e "$RUNNER_TEMP/brand-takedown-a.zip" "$RUNNER_TEMP/package-test"
+          cd "$RUNNER_TEMP/package-test/brand-takedown"
+          python scripts/verify_source.py
+          python -c 'import hashlib,pathlib; rows=pathlib.Path("SHA256SUMS.txt").read_text().splitlines(); assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()==h for h,p in (row.split("  ",1) for row in rows))'
+          python -m unittest discover -s tests -v
