@@ -131,3 +131,42 @@ class TestPackets(Fixture):
 
     def test_path_traversal_packet_id_rejected(self):
         with self.assertRaises(ValueError): packets.verify_approved_packet(self.case, "../../other")
+
+    def test_public_archive_requires_agent_or_explicit_override(self):
+        self.req["public_archive_expected"] = True
+        with self.assertRaises(ValueError):
+            self.prepare()
+        self.req["allow_primary_signatory_in_public_archive"] = True
+        draft = self.prepare()
+        packet = json.loads((Path(draft["packet_dir"]) / "packet.json").read_text())
+        self.assertEqual(packet["signatory_mode"], "PRIMARY_SIGNATORY")
+        self.assertTrue(packet["public_archive_expected"])
+        self.assertIn("Lumen Database", packet["disclosure_advisory"])
+
+    def test_public_filing_agent_shields_primary_signatory(self):
+        p = copy.deepcopy(self.profile)
+        p["public_filing_agent"] = {
+            "name": "Shielded Compliance Agent",
+            "title": "Authorized Enforcement Agent",
+            "legal_email": "enforcement-proxy@agent.example",
+            "entity_address": "PO Box 900, Agent Suite",
+            "phone": "+1-202-555-0199",
+        }
+        br.register_brand("example-brand", self.brand, p, self.registry)
+        self.req["public_archive_expected"] = True
+        draft = self.prepare()
+        directory = Path(draft["packet_dir"])
+        body = (directory / "notice.txt").read_text()
+        packet = json.loads((directory / "packet.json").read_text())
+        self.assertEqual(packet["signatory_mode"], "PUBLIC_FILING_AGENT")
+        self.assertEqual(packet["from_addr"], "enforcement-proxy@agent.example")
+        self.assertIn("Shielded Compliance Agent", body)
+        self.assertIn("PO Box 900, Agent Suite", body)
+        self.assertNotIn("Example Reviewer", body)
+        self.assertNotIn("legal@brand.example", body)
+        self.assertNotIn("Fictional address", body)
+
+    def test_use_public_filing_agent_without_profile_config_rejected(self):
+        self.req["use_public_filing_agent"] = True
+        with self.assertRaises(ValueError):
+            self.prepare()

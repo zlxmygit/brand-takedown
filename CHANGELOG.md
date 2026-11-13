@@ -1,5 +1,11 @@
 # 更新日志
 
+## v1.2.0
+
+- 新增 **Lumen Database** 公共档案防隐私暴露与授权代理署名护栏：`profile.schema.json` 与 `brand_registry.py` 新增可选 `public_filing_agent` 代理署名人/商用邮政地址配置及格式校验。
+- `packets.py` 支持 `public_archive_expected` 与 `use_public_filing_agent` 安全切换机制：对预期公开归档渠道自动改用代理署名（未配置代理时 fail-closed 拦截，除非经隐私复核显式允许主署名人）。
+- 在 `SKILL.md`、`channel-playbook.md`、`legal-jurisdictions.md`、`policy-sources.json` (`S12`) 及投诉文书模板补全公开披露隐私自检护栏。
+
 ## v1.1.0
 
 - 增强域名 RDAP 查询：支持子域名逐级回退至可注册主域（兼容常见二级公共后缀），并结构化提取注册商、IANA ID、注册/到期时间、abuse 邮箱/电话、NS 与归一化 `status_codes`。

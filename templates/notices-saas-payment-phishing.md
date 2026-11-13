@@ -22,3 +22,5 @@ Please acknowledge receipt and advise us of your decision and available review r
 ```
 
 来源：见 [channel-playbook.md](../references/channel-playbook.md) 与 [policy-sources.json](../references/policy-sources.json)。
+
+公开披露自检：主要 SaaS 与搜索服务商可能向涉事商家转发投诉正文及联系信息，或同步收录至 `Lumen Database`；如涉公开归档，请在品牌档案中启用 `public_filing_agent` 并在请求中标记 `public_archive_expected: true`。

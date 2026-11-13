@@ -45,6 +45,27 @@ def _packet_path(case_dir: Path, packet_id: str) -> Path:
     return safe_path(case_dir) / "packets" / packet_id
 
 
+def _select_signatory(profile: dict, request: dict) -> tuple[dict, str, str]:
+    """Select shielded public_filing_agent when public/Lumen archiving is expected."""
+    for flag in ("public_archive_expected", "use_public_filing_agent", "allow_primary_signatory_in_public_archive"):
+        if flag in request and not isinstance(request[flag], bool):
+            raise ValueError(f"{flag} must be a boolean")
+    public_archive_expected = bool(request.get("public_archive_expected"))
+    use_agent = bool(request.get("use_public_filing_agent"))
+    allow_primary = bool(request.get("allow_primary_signatory_in_public_archive"))
+    agent = profile.get("public_filing_agent")
+    if use_agent or (public_archive_expected and agent):
+        if not agent:
+            raise ValueError("public_filing_agent requested but not configured in brand profile")
+        return agent, agent["entity_address"], "PUBLIC_FILING_AGENT"
+    if public_archive_expected and not allow_primary:
+        raise ValueError(
+            "Channel expects public/Lumen archiving: configure public_filing_agent in brand profile "
+            "or explicitly set allow_primary_signatory_in_public_archive=true after privacy review"
+        )
+    return profile["authorized_signatory"], profile["entity_address"], "PRIMARY_SIGNATORY"
+
+
 def _validate_request(case_dir: Path, request: dict) -> tuple[dict, dict, dict]:
     case = load_case(case_dir)
     profile = case_profile(case_dir)
@@ -123,6 +144,7 @@ def _validate_request(case_dir: Path, request: dict) -> tuple[dict, dict, dict]:
                     raise ValueError("Registered-right notice requires a certificate attachment")
         if kind == "PRODUCT_SAFETY":
             _text(claim.get("specific_requirement_and_defect"), "specific product requirement and observed defect")
+    _select_signatory(profile, request)
     return case, profile, channel
 
 
@@ -175,8 +197,12 @@ def _prepare_packet(case_dir: Path, request: dict) -> dict:
         lines.append("I confirm my bona fide belief that the information and allegations in this notice are accurate and complete.")
     else:
         lines.append("The allegations are submitted in good faith for review; no outcome or provider liability is assumed.")
-    signer = profile["authorized_signatory"]
-    lines.extend(["", "/s/ " + signer["name"], signer["title"], profile["entity_address"], signer["legal_email"], signer.get("phone", "")])
+    signer, signer_address, signatory_mode = _select_signatory(profile, request)
+    sig_lines = ["", "/s/ " + signer["name"], signer["title"]]
+    if signatory_mode == "PUBLIC_FILING_AGENT":
+        sig_lines.append(f"Authorized Filing Agent for {profile['legal_entity_name_en']}")
+    sig_lines.extend([signer_address, signer["legal_email"], signer.get("phone", "")])
+    lines.extend(sig_lines)
     body = "\n".join(lines) + "\n"
     if request["route"] == "COPYRIGHT_NOTICE" and not signer.get("phone", "").strip():
         raise ValueError("Complete contact information, including telephone, required for this DMCA packet")
@@ -184,7 +210,10 @@ def _prepare_packet(case_dir: Path, request: dict) -> dict:
     packet = {"schema_version": 2, "packet_id": packet_id, "case_id": case["case_id"], "brand_id": profile["brand_id"],
         "profile_sha256": _digest((safe_path(case_dir).parent.parent / "profile.json").read_bytes()),
         "channel_id": channel["channel_id"], "endpoint": channel["target_endpoint"], "tier": channel.get("pending_tier", 1),
-        "from_addr": signer["legal_email"], "subject": request["subject"], "request": request,
+        "from_addr": signer["legal_email"], "signatory_mode": signatory_mode,
+        "public_archive_expected": bool(request.get("public_archive_expected")),
+        "disclosure_advisory": "Notices may be forwarded to the merchant and indexed in public archives (e.g., Lumen Database); redact personal PII before approval.",
+        "subject": request["subject"], "request": request,
         "body_sha256": _digest(body.encode("utf-8")), "attachments": attachments, "created_at": utc_now()}
     atomic_write_json(directory / "packet.json", packet)
     return {"packet_id": packet_id, "status": "DRAFT_REQUIRES_HUMAN_REVIEW", "packet_dir": str(directory), "packet_sha256": _digest((directory / "packet.json").read_bytes())}

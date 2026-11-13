@@ -85,3 +85,18 @@ class TestBrandRegistry(Fixture):
     def test_private_permissions(self):
         self.assertEqual((self.brand / "profile.json").stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.brand.stat().st_mode & 0o777, 0o700)
+
+    def test_public_filing_agent_validation(self):
+        p = copy.deepcopy(self.profile)
+        p["public_filing_agent"] = {
+            "name": "Example Legal Proxy",
+            "title": "Enforcement Counsel",
+            "legal_email": "dmca-agent@proxy.example",
+            "entity_address": "PO Box 100, Business Center",
+            "phone": "+1-202-555-0199",
+        }
+        self.assertEqual(br.validate_profile(p), [])
+        bad_email = copy.deepcopy(p); bad_email["public_filing_agent"]["legal_email"] = "not-an-email"
+        self.assertTrue(br.validate_profile(bad_email))
+        missing_addr = copy.deepcopy(p); missing_addr["public_filing_agent"].pop("entity_address")
+        self.assertTrue(br.validate_profile(missing_addr))

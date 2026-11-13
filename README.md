@@ -116,7 +116,7 @@ python3 scripts/case_manager.py add-channel --slug example-brand \
 
 知识产权主张还需填写 `right_index`，对应品牌档案中权利数组的下标，从 `0` 开始。产品安全主张需填写 `specific_requirement_and_defect`，说明具体要求和观察到的缺陷。
 
-`route` 支持 `COPYRIGHT_NOTICE`、`TRADEMARK_NOTICE`、`DESIGN_NOTICE`、`ABUSE_REPORT`、`DSA_NOTICE`、`SAFETY_REFERRAL` 和 `REGULATORY_FILING`。当前版权通知模板适用于美国；DSA 通知要求地区为 `EU`，服务商角色为 `hosting`。
+`route` 支持 `COPYRIGHT_NOTICE`、`TRADEMARK_NOTICE`、`DESIGN_NOTICE`、`ABUSE_REPORT`、`DSA_NOTICE`、`SAFETY_REFERRAL` 和 `REGULATORY_FILING`。当前版权通知模板适用于美国；DSA 通知要求地区为 `EU`，服务商角色为 `hosting`。对于可能被服务商转发至商家或纳入 **Lumen Database** 公开归档库的通道，可在品牌档案配置可选 `public_filing_agent`，并在请求中标记 `"public_archive_expected": true`，防止经办人个人隐私信息被公开索引。
 
 核验时间使用带时区的 ISO 8601 格式，并保持在最近 30 天内。请求结构示例见 [`tests/common.py`](tests/common.py)，其中的测试数据仅供了解字段格式。
 

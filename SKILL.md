@@ -26,8 +26,11 @@ Read [host-contract.md](./references/host-contract.md) before using external too
    schedule jobs, make purchases, browse checkout, or create Wayback snapshots.
    Proxy, referer spoofing and public archival are disabled, not silent fallbacks.
 4. **Evidence first, disclosure consent next.** Any provider may notify the merchant
-   or disclose complaint/contact information. Capture necessary evidence before a
-   complaint; do not promise a confidential first wave.
+   or forward notices into public transparency archives (such as `Lumen Database`),
+   exposing signatory name, corporate identity, URLs and contact fields. Capture
+   necessary evidence before a complaint, use `public_filing_agent` in profile when
+   public archiving is expected (`public_archive_expected: true`), and do not
+   promise a confidential first wave.
 5. **Human review is real.** Never invent a reviewer identity or execute
    `--confirm-human-review` without the authorized user's explicit approval of the
    displayed packet digest, recipients, text and attachments. Unattended runs stop

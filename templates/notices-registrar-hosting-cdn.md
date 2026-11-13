@@ -18,4 +18,7 @@ Please assess the request in light of your actual service role and the applicabl
 If you are not the appropriate provider, please identify the correct reporting process where permitted.
 ```
 
-来源：见 [legal-jurisdictions.md](../references/legal-jurisdictions.md)。
+来源：见 [legal-jurisdictions.md](../references/legal-jurisdictions.md) 与 [channel-playbook.md](../references/channel-playbook.md)。
+
+公开归档自检（向 Cloudflare、搜索引擎或可能接入 `Lumen Database` 的渠道提交前）：
+- 已核对正文、附件及署名人区域不含个人住宅地址、个人手机或私人邮箱，并优先启用 `public_filing_agent` 与 `public_archive_expected: true`。

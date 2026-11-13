@@ -89,6 +89,14 @@
       "scope": "Article19远程销售展示信息；适用品类与专门法重叠应分别判断。",
       "checked_on": "2026-11-12",
       "verification_method": "official primary page or indexed official text; no live submission"
+    },
+    {
+      "id": "S12",
+      "title": "Lumen Database：公开内容移除通知研究库",
+      "url": "https://lumendatabase.org/",
+      "scope": "部分科技平台与搜索引擎会向Lumen转发法律移除通知；不同服务商对个人电话/邮箱脱敏策略不同，提交前须核验并采用授权代理署名防个人隐私公开暴露。",
+      "checked_on": "2026-11-13",
+      "verification_method": "official primary site and provider transparency reference; no live submission"
     }
   ]
 }

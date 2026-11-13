@@ -153,6 +153,10 @@ def validate_profile(profile: dict, base_dir: Path | None = None) -> list[str]:
     signatory = profile["authorized_signatory"]
     if not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+", signatory["legal_email"]):
         errors.append("authorized_signatory.legal_email: invalid email")
+    if "public_filing_agent" in profile:
+        agent = profile["public_filing_agent"]
+        if not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+", agent["legal_email"]):
+            errors.append("public_filing_agent.legal_email: invalid email")
     urls = profile.get("official_product_urls", []) + [c["official_source_url"] for c in profile.get("copyright_originals", [])]
     if profile.get("counterfeit_warning_url"):
         urls.append(profile["counterfeit_warning_url"])

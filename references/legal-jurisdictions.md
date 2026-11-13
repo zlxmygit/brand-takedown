@@ -34,11 +34,12 @@ Directive (EU) 2022/2555 Article 28 的数据访问须结合国家实施、适�
 充分理由、必要性与数据保护审核。72 小时回复要求不能改写为必须无条件交出所有身份和账单资料。
 当前软件不自动生成 NIS2 披露请求；应由专业审核人选择最小必要数据并走真实官方流程。
 
-## 提交前门禁
+## 提交前门禁（含公开归档隐私复核）
 
-`packets.py` 将每项主张绑定真实目标、sealed capture、具体文件、权利索引、属地和来源核验。
-仍然必须由人判断证据真实性、权利范围、例外和法律适用，不能把结构校验当成律师结论。
-官方政策入口：
+`packets.py` 将每项主张绑定真实目标、sealed capture、具体文件、权利索引、属地和来源核验；对于可能公开索引（如 `Lumen Database`）的渠道，配合 `public_filing_agent` 与 `public_archive_expected` 隔离私人联系信息，不暴露住宅地址或私人手机号。
+仍然必须由人判断证据真实性、权利范围、例外、隐私脱敏与法律适用，不能把结构校验当成律师结论。
+官方政策与透明度参考入口：
 - US Copyright Office: https://www.copyright.gov/512/
 - DSA: https://eur-lex.europa.eu/eli/reg/2022/2065
 - NIS2: https://eur-lex.europa.eu/eli/dir/2022/2555/oj/eng
+- Lumen Database: https://lumendatabase.org/
