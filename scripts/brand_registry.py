@@ -287,6 +287,8 @@ def _main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from runtime_support import configure_cli
+    configure_cli()
     try:
         sys.exit(_main())
     except (ValueError, OSError, KeyError) as exc:

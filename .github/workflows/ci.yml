@@ -15,45 +15,44 @@ jobs:
   verify:
     name: Verify (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 12
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2022]
         python: ["3.11", "3.13"]
+    env:
+      PYTHONUTF8: "0"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python }}
-      - name: Verify exact locally tested sources
+      - name: Install platform data
+        run: python -m pip install --require-hashes -r requirements.txt
+      - name: Verify exact sources
         run: python scripts/verify_source.py
       - name: Compile and diagnose
-        run: |
-          python -m compileall -q scripts tests
-          python scripts/doctor.py
-          python scripts/brand_registry.py validate --profile-file examples/sample-profile.json
+        run: python scripts/check_distribution.py --smoke
       - name: Offline negative and workflow tests
         run: python -m unittest discover -s tests -v
       - name: Tracked private artifact guard
-        shell: bash
+        run: python scripts/check_distribution.py --tracked
+      - name: Test installed package and reproducibility
+        run: python scripts/check_distribution.py --package
+      - name: PowerShell quick start
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if git ls-files | grep -Ei '(^|/)(cases|certificates|evidence|packets)/|(^|/)(profile|registry|case|radar_seen|evidence-manifest|recon-report)\.json$|\.(eml|pdf|png|jpe?g|har|pem|key|sqlite3|sqlite3-journal|sqlite3-wal|sqlite3-shm)$|(^|/)\.psl-update\.json$|(^|/)\.env($|\.)'; then
-            echo 'Private runtime artifacts must not be tracked.'
-            exit 1
-          fi
-      - name: Deterministic generic package
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/package_skill.py --out "$RUNNER_TEMP/brand-takedown-a.zip"
-          python scripts/package_skill.py --out "$RUNNER_TEMP/brand-takedown-b.zip"
-          cmp "$RUNNER_TEMP/brand-takedown-a.zip" "$RUNNER_TEMP/brand-takedown-b.zip"
-          python -m zipfile -e "$RUNNER_TEMP/brand-takedown-a.zip" "$RUNNER_TEMP/package-test"
-          cd "$RUNNER_TEMP/package-test/brand-takedown"
-          python scripts/verify_source.py
-          python -c 'import hashlib,pathlib; rows=pathlib.Path("SHA256SUMS.txt").read_text().splitlines(); assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()==h for h,p in (row.split("  ",1) for row in rows))'
-          python -m unittest discover -s tests -v
+          $env:BRAND_TAKEDOWN_REGISTRY = Join-Path $env:RUNNER_TEMP '跨平台 入门/registry.json'
+          $profile = Join-Path $env:RUNNER_TEMP '跨平台 入门/input.json'
+          New-Item -ItemType Directory -Force (Split-Path $profile) | Out-Null
+          Copy-Item examples/sample-profile.json $profile
+          python scripts/brand_registry.py init --slug example-brand --data-dir (Join-Path (Split-Path $profile) 'brand') --profile-file $profile
+          if ($LASTEXITCODE -ne 0) { throw 'Brand registration failed' }
+          python scripts/case_manager.py create --slug example-brand --url 'https://suspect.example/product' --types COPYRIGHT_CLONE
+          if ($LASTEXITCODE -ne 0) { throw 'Case creation failed' }
+          python scripts/case_manager.py summary --slug example-brand
+          if ($LASTEXITCODE -ne 0) { throw 'Case summary failed' }

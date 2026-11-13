@@ -24,12 +24,33 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.registry = self.root / "registry.json"
         self.brand = self.root / "brand"
-        self.profile = json.loads((ROOT / "examples/sample-profile.json").read_text())
+        self.profile = json.loads((ROOT / "examples/sample-profile.json").read_text(encoding="utf-8"))
         self.profile["copyright_originals"] = [{"asset_name": "Original photo", "official_source_url": "https://brand.example/product"}]
         self.profile["keyword_watch_patterns"] = ["examplebrand"]
         br.register_brand(self.profile["brand_slug"], self.brand, self.profile, self.registry)
         self.profile = br.profile_from_dir(self.brand)
         self.case, _ = cm.create_case(self.brand, "https://suspect.example/product", ["COPYRIGHT_CLONE"])
+
+
+    def assertPrivatePath(self, path, directory=False):
+        import os
+        if os.name == "nt":
+            import re
+            from windows_security import current_user_sid, read_dacl
+            dacl = read_dacl(path)
+            self.assertTrue(dacl.startswith("D:P"), dacl)
+            aces = re.findall(r"\(([^)]+)\)", dacl)
+            self.assertEqual(len(aces), 3, dacl)
+            self.assertEqual({a.split(";")[-1] for a in aces}, {current_user_sid(), "SY", "BA"})
+            for ace in aces:
+                fields = ace.split(";")
+                self.assertEqual(fields[0], "A")
+                self.assertEqual(fields[2], "FA")
+                self.assertNotIn("ID", fields[1])
+                if directory:
+                    self.assertIn("OI", fields[1]); self.assertIn("CI", fields[1])
+        else:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700 if directory else 0o600)
 
     def capture(self, body=b"<h1>examplebrand copied image</h1>", url=None):
         url = url or "https://suspect.example/product"

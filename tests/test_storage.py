@@ -43,10 +43,10 @@ class TestStorage(Fixture):
         self.assertEqual(list(self.root.glob(".write-*")), [])
 
     def test_symlink_state_rejected(self):
-        other = self.root / "other.json"; other.write_text('{"x":1}')
+        other = self.root / "other.json"; other.write_text('{"x":1}', encoding="utf-8")
         path = self.root / "linked.json"; path.symlink_to(other)
         with self.assertRaises(ValueError): atomic_write_json(path, {"x": 2})
-        self.assertEqual(json.loads(other.read_text()), {"x": 1})
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8")), {"x": 1})
 
     def test_generic_save_cannot_reassign_identity(self):
         data = cm.load_case(self.case); data["brand_id"] = "other"

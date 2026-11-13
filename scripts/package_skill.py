@@ -17,6 +17,8 @@ FILES = (
     '.github/workflows/psl-check.yml',
     '.github/workflows/release.yml',
     '.gitignore',
+    '.gitattributes',
+    'requirements.txt',
     'CHANGELOG.md',
     'CODE_OF_CONDUCT.md',
     'CONTRIBUTING.md',
@@ -32,6 +34,7 @@ FILES = (
     'docs/releases/v1.4.0.md',
     'docs/releases/v1.4.1.md',
     'docs/releases/v1.4.2.md',
+    'docs/releases/v1.4.3.md',
     'docs/source-checksums.json',
     'examples/sample-profile.json',
     'references/channel-playbook.md',
@@ -40,6 +43,7 @@ FILES = (
     'references/host-contract.md',
     'references/followup-workflows.md',
     'references/maintenance.md',
+    'references/platforms.md',
     'references/legal-jurisdictions.md',
     'references/policy-sources.json',
     'references/public-suffix-license.md',
@@ -60,6 +64,9 @@ FILES = (
     'scripts/radar_archive.py',
     'scripts/safe_http.py',
     'scripts/storage.py',
+    'scripts/runtime_support.py',
+    'scripts/windows_security.py',
+    'scripts/check_distribution.py',
     'scripts/verify_source.py',
     'scripts/update_psl.py',
     'templates/notices-escalation-chaser.md',
@@ -78,6 +85,7 @@ FILES = (
     'tests/test_safe_http.py',
     'tests/test_skill_integrity.py',
     'tests/test_storage.py',
+    'tests/test_cross_platform.py',
 )
 
 
@@ -92,16 +100,20 @@ def build_package(output: Path, root: Path = ROOT) -> str:
         for name in sorted(FILES):
             content = safe_path(root / name).read_bytes()
             info = zipfile.ZipInfo("brand-takedown/" + name, date_time=(2026, 11, 12, 0, 0, 0))
+            info.create_system = 3
             info.external_attr = 0o100644 << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, content)
             manifest.append(hashlib.sha256(content).hexdigest() + "  " + name)
         info = zipfile.ZipInfo("brand-takedown/SHA256SUMS.txt", date_time=(2026, 11, 12, 0, 0, 0))
+        info.create_system = 3
         info.external_attr = 0o100644 << 16
         archive.writestr(info, "\n".join(manifest) + "\n")
     return hashlib.sha256(output.read_bytes()).hexdigest()
 
 
 if __name__ == "__main__":
+    from runtime_support import configure_cli
+    configure_cli()
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(); print(build_package(args.out) + "  " + str(args.out))

@@ -77,3 +77,9 @@ Re-enter and independently review open counter-notices before resuming operation
 Repository owners should separately enable branch protection, required reviews/checks, private security
 reporting, and organization-level security controls. These administrative
 settings are managed separately.
+
+## v1.4.3 跨平台支持
+
+新增 Windows 原生文件锁和私有 ACL，保留 macOS、Linux 的文件锁和权限策略。统一 CLI UTF-8 输出，接受 PowerShell UTF-8 BOM 输入；安装包固定 LF 和 ZIP 平台元数据。Windows 安装固定版本的时区数据。CI 覆盖三种系统与两种 Python 版本，均验证源码和安装包。
+
+平台操作见 [跨平台说明](../references/platforms.md)。

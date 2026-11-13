@@ -41,11 +41,11 @@ python3 scripts/update_psl.py rollback --to "$PREVIOUS_SHA256" \
 
 ## 主分支保护
 
-[branch-protection.json](../.github/branch-protection.json) 定义四组必需检查，并关闭强推和分支删除。仓库管理员可以在有 `Administration: write` 权限的环境中应用：
+[branch-protection.json](../.github/branch-protection.json) 定义六组必需检查，并关闭强推和分支删除。仓库管理员可以在有 `Administration: write` 权限的环境中应用：
 
 ```bash
 gh api --method PUT repos/zlxmygit/brand-takedown/branches/main/protection \
   --input .github/branch-protection.json
 ```
 
-配置文件提交到仓库不代表设置已经生效。应用后读取同一接口，确认四组检查、管理员约束和删除限制。此操作使用管理员已有的认证环境，不将凭证写入仓库。
+配置文件提交到仓库不代表设置已经生效。应用后读取同一接口，确认六组检查、管理员约束和删除限制。此操作使用管理员已有的认证环境，不将凭证写入仓库。

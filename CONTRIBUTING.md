@@ -21,7 +21,9 @@ python3 -m compileall -q scripts tests
 python3 scripts/doctor.py
 python3 scripts/brand_registry.py validate --profile-file examples/sample-profile.json
 python3 -m unittest discover -s tests -v
-python3 scripts/package_skill.py --out /tmp/brand-takedown.zip
+python3 scripts/check_distribution.py --package
 ```
 
 检查提交文件，确认只包含源码、文档和合成测试数据。真实品牌档案、证书、案件和邮件保存在仓库外。
+
+Windows 使用 PowerShell 和 `py -3`，先安装 `requirements.txt`。本地验证与 CI 均运行源码和安装包测试；平台专用测试在对应系统执行。详见[跨平台说明](references/platforms.md)。

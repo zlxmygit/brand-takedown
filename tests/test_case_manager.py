@@ -108,5 +108,5 @@ class TestCaseManager(Fixture):
         with self.assertRaises(ValueError): cm._parse_iso_utc("2026-11-12T12:00:00")
 
     def test_corrupt_case_is_visible_not_silent(self):
-        (self.case / "case.json").write_text("{")
+        (self.case / "case.json").write_text("{", encoding="utf-8")
         self.assertEqual(cm.scan_due_escalations(self.brand)[0]["kind"], "CASE_ERROR")

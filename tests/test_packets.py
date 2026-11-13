@@ -76,7 +76,7 @@ class TestPackets(Fixture):
     def test_safety_category_does_not_add_hazard_allegations(self):
         p = copy.deepcopy(self.profile); p["product_risk_profile"] = {"category": "electronics_battery", "hazard_statement_en": "UNVERIFIED_DANGER_MARKER"}
         br.register_brand("example-brand", self.brand, p, self.registry)
-        draft = self.prepare(); body = (Path(draft["packet_dir"]) / "notice.txt").read_text()
+        draft = self.prepare(); body = (Path(draft["packet_dir"]) / "notice.txt").read_text(encoding="utf-8")
         self.assertNotIn("UNVERIFIED_DANGER_MARKER", body)
 
     def test_stale_provider_endpoint_rejected(self):
@@ -104,12 +104,12 @@ class TestPackets(Fixture):
         with self.assertRaises(OSError): build_approved_eml(self.case, draft["packet_id"], Path(draft["packet_dir"]) / "notice.eml")
 
     def test_body_change_invalidates_approval(self):
-        draft = self.approve(); (Path(draft["packet_dir"]) / "notice.txt").write_text("changed")
+        draft = self.approve(); (Path(draft["packet_dir"]) / "notice.txt").write_text("changed", encoding="utf-8")
         with self.assertRaises(ValueError): packets.verify_approved_packet(self.case, draft["packet_id"])
 
     def test_attachment_change_invalidates_approval(self):
         draft = self.approve(); directory = Path(draft["packet_dir"])
-        packet = json.loads((directory / "packet.json").read_text()); (directory / packet["attachments"][0]["filename"]).write_bytes(b"changed")
+        packet = json.loads((directory / "packet.json").read_text(encoding="utf-8")); (directory / packet["attachments"][0]["filename"]).write_bytes(b"changed")
         with self.assertRaises(ValueError): packets.verify_approved_packet(self.case, draft["packet_id"])
 
     def test_original_evidence_change_invalidates_approval(self):
@@ -126,7 +126,7 @@ class TestPackets(Fixture):
         draft = self.approve(); directory = Path(draft["packet_dir"])
         output = build_approved_eml(self.case, draft["packet_id"], directory / "notice.eml")
         message = email.message_from_bytes(output.read_bytes(), policy=email.policy.default)
-        self.assertEqual(message.get_body().get_content().replace("\r\n", "\n"), (directory / "notice.txt").read_text())
+        self.assertEqual(message.get_body().get_content().replace("\r\n", "\n"), (directory / "notice.txt").read_text(encoding="utf-8"))
         self.assertEqual(message["To"], "abuse@provider.example")
 
     def test_path_traversal_packet_id_rejected(self):
@@ -138,7 +138,7 @@ class TestPackets(Fixture):
             self.prepare()
         self.req["allow_primary_signatory_in_public_archive"] = True
         draft = self.prepare()
-        packet = json.loads((Path(draft["packet_dir"]) / "packet.json").read_text())
+        packet = json.loads((Path(draft["packet_dir"]) / "packet.json").read_text(encoding="utf-8"))
         self.assertEqual(packet["signatory_mode"], "PRIMARY_SIGNATORY")
         self.assertTrue(packet["public_archive_expected"])
         self.assertIn("Lumen Database", packet["disclosure_advisory"])
@@ -156,8 +156,8 @@ class TestPackets(Fixture):
         self.req["public_archive_expected"] = True
         draft = self.prepare()
         directory = Path(draft["packet_dir"])
-        body = (directory / "notice.txt").read_text()
-        packet = json.loads((directory / "packet.json").read_text())
+        body = (directory / "notice.txt").read_text(encoding="utf-8")
+        packet = json.loads((directory / "packet.json").read_text(encoding="utf-8"))
         self.assertEqual(packet["signatory_mode"], "PUBLIC_FILING_AGENT")
         self.assertEqual(packet["from_addr"], "enforcement-proxy@agent.example")
         self.assertIn("Shielded Compliance Agent", body)

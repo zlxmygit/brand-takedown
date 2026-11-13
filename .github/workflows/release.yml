@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/release.yml
-      - docs/releases/v1.4.2.md
+      - docs/releases/v1.4.3.md
   workflow_dispatch:
 permissions:
   contents: read
@@ -35,9 +35,9 @@ jobs:
           set -euo pipefail
           python scripts/verify_source.py
           mkdir -p "$RUNNER_TEMP/release-assets"
-          python scripts/package_skill.py --out "$RUNNER_TEMP/release-assets/brand-takedown-v1.4.2.zip"
+          python scripts/package_skill.py --out "$RUNNER_TEMP/release-assets/brand-takedown-v1.4.3.zip"
           cd "$RUNNER_TEMP/release-assets"
-          sha256sum brand-takedown-v1.4.2.zip > SHA256SUMS.txt
+          sha256sum brand-takedown-v1.4.3.zip > SHA256SUMS.txt
       - name: Publish verified assets
         shell: bash
         env:
@@ -45,7 +45,7 @@ jobs:
           GH_REPO: zlxmygit/brand-takedown
         run: |
           set -euo pipefail
-          tag=v1.4.2
+          tag=v1.4.3
           test "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
           if gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -Fxq "$tag"; then
             echo 'Release already exists; refusing to replace it.'
@@ -54,14 +54,14 @@ jobs:
           test "$(gh api "repos/$GH_REPO/git/matching-refs/tags/$tag" --jq 'length')" = 0
           assets="$RUNNER_TEMP/release-assets"
           gh release create "$tag" --draft --target "$GITHUB_SHA" --title "$tag" \
-            --notes-file docs/releases/v1.4.2.md "$assets/brand-takedown-v1.4.2.zip" "$assets/SHA256SUMS.txt"
+            --notes-file docs/releases/v1.4.3.md "$assets/brand-takedown-v1.4.3.zip" "$assets/SHA256SUMS.txt"
           gh release download "$tag" --dir "$RUNNER_TEMP/draft-check"
           (cd "$RUNNER_TEMP/draft-check" && sha256sum -c SHA256SUMS.txt)
-          cmp "$assets/brand-takedown-v1.4.2.zip" "$RUNNER_TEMP/draft-check/brand-takedown-v1.4.2.zip"
+          cmp "$assets/brand-takedown-v1.4.3.zip" "$RUNNER_TEMP/draft-check/brand-takedown-v1.4.3.zip"
           gh release edit "$tag" --draft=false --prerelease=false --latest
           gh release download "$tag" --dir "$RUNNER_TEMP/published-check"
           (cd "$RUNNER_TEMP/published-check" && sha256sum -c SHA256SUMS.txt)
-          cmp "$assets/brand-takedown-v1.4.2.zip" "$RUNNER_TEMP/published-check/brand-takedown-v1.4.2.zip"
+          cmp "$assets/brand-takedown-v1.4.3.zip" "$RUNNER_TEMP/published-check/brand-takedown-v1.4.3.zip"
           test "$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name')" = "$tag"
           test "$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq '.object.sha')" = "$GITHUB_SHA"
           test "$(gh api "repos/$GH_REPO/releases/tags/$tag" --jq '.assets|length')" = 2

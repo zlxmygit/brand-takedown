@@ -2,7 +2,7 @@
 
 ## Supported scope
 
-The current reviewed workflow is human-supervised, single-owner, single-host Linux/macOS on a private
+The current reviewed workflow is human-supervised, single-owner, single-host macOS/Windows/Linux on a private
 local filesystem with Python 3.11+.
 Do not use NFS/shared cloud storage, multiple hosts or untrusted local users sharing the runtime account.
 
@@ -32,3 +32,5 @@ Use GitHub private vulnerability reporting when enabled by the maintainer. If un
 maintainer privately; do not assume that the existence of an advisory URL enables the feature.
 Required branch checks, review rules, secret scanning and signing are repository-admin controls and must
 be configured separately. Runtime logs and artifacts must not contain real case data.
+
+Windows storage uses native byte-range locks and protected DACLs for the current user, SYSTEM and local administrators. Reparse points, network drives, reserved device names and alternate data streams are rejected. File contents are flushed before replacement; directory fsync remains POSIX-only.

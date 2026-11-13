@@ -14,7 +14,7 @@ import sqlite3
 import uuid
 
 from brand_registry import normalize_hostname, profile_from_dir, utc_now
-from storage import atomic_write_json, locked, read_json, safe_path
+from storage import atomic_write_json, locked, read_json, safe_path, open_private_file, secure_permissions
 
 REVIEWED = frozenset(("REJECTED", "AUTHORIZED", "CONFIRMED_FOR_REVIEWED_CASE"))
 MAX_BATCH = 1000
@@ -37,11 +37,11 @@ def _database(brand_dir: Path, *, create: bool = False):
         yield None
         return
     if not path.exists():
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fd = open_private_file(path, exclusive=True)
         os.close(fd)
     if not path.is_file():
         raise ValueError("Radar archive must be a regular file")
-    os.chmod(path, 0o600)
+    secure_permissions(path)
     db = None
     try:
         db = sqlite3.connect(str(path), timeout=10)

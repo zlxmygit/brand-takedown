@@ -22,7 +22,7 @@ class TestSkillIntegrity(unittest.TestCase):
             self.assertTrue((ROOT / name).is_file(), name)
 
     def test_skill_budget_and_links(self):
-        text = (ROOT / "SKILL.md").read_text()
+        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\nname: brand-takedown\n"))
         self.assertLessEqual(len(text.splitlines()), 250)
         for link in re.findall(r"\]\(([^)#]+)\)", text):
@@ -31,12 +31,12 @@ class TestSkillIntegrity(unittest.TestCase):
 
     def test_all_local_markdown_links_resolve(self):
         for path in ROOT.rglob("*.md"):
-            for link in re.findall(r"\]\(([^)#]+)\)", path.read_text()):
+            for link in re.findall(r"\]\(([^)#]+)\)", path.read_text(encoding="utf-8")):
                 if "://" not in link and not link.startswith("mailto:"):
                     self.assertTrue((path.parent / link).exists(), (path, link))
 
     def test_schema_keywords_are_implemented(self):
-        schema = json.loads((ROOT / "templates/profile.schema.json").read_text())
+        schema = json.loads((ROOT / "templates/profile.schema.json").read_text(encoding="utf-8"))
         supported = {"$schema", "title", "description", "type", "required", "properties", "additionalProperties", "items",
                      "enum", "minLength", "maxLength", "minItems", "uniqueItems", "pattern", "format", "minimum", "maximum"}
         def visit(node):
@@ -46,20 +46,20 @@ class TestSkillIntegrity(unittest.TestCase):
         visit(schema)
 
     def test_generic_example_matches_runtime_schema(self):
-        value = json.loads((ROOT / "examples/sample-profile.json").read_text())
+        value = json.loads((ROOT / "examples/sample-profile.json").read_text(encoding="utf-8"))
         self.assertEqual(br.validate_profile(value), [])
         for domain in value["official_domains"] + value.get("allowlist_domains", []):
             self.assertTrue(domain.endswith(".example"))
 
     def test_all_audit_ids_have_unique_ledger_rows(self):
-        text = (ROOT / "docs/audit-remediation.md").read_text()
+        text = (ROOT / "docs/audit-remediation.md").read_text(encoding="utf-8")
         ids = re.findall(r"^\|(BT-\d\d)\|", text, re.M)
         self.assertEqual(ids, [f"BT-{i:02d}" for i in range(1, 40)])
         self.assertIn("Partial", text); self.assertIn("Restricted", text)
 
     def test_unsafe_guarantees_removed_from_active_guidance(self):
         for relative in ("SKILL.md", "references/channel-playbook.md", "references/escalation-and-counter-notice.md", "templates/notices-escalation-chaser.md"):
-            text = (ROOT / relative).read_text()
+            text = (ROOT / relative).read_text(encoding="utf-8")
             for phrase in ("permanently welded", "indisputable actual knowledge", "95%", "100% 缺失", "永久焊死", "直接触发共同侵权"):
                 self.assertNotIn(phrase, text)
 
@@ -67,18 +67,18 @@ class TestSkillIntegrity(unittest.TestCase):
         import sys
         local = {p.stem for p in (ROOT / "scripts").glob("*.py")}
         for path in (ROOT / "scripts").glob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
                 for name in names:
                     self.assertIn(name.split(".")[0], sys.stdlib_module_names | local, (path, name))
 
     def test_no_shell_true_or_embedded_sender_credentials(self):
         for path in (ROOT / "scripts").glob("*.py"):
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.keyword) and node.arg == "shell":
                     self.assertFalse(isinstance(node.value, ast.Constant) and node.value.value is True)
-            self.assertNotIn("SMTP_PASSWORD", path.read_text())
+            self.assertNotIn("SMTP_PASSWORD", path.read_text(encoding="utf-8"))
 
     def test_reproducible_package_excludes_unlisted_private_files(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -86,9 +86,9 @@ class TestSkillIntegrity(unittest.TestCase):
             for name in FILES:
                 target = copy / name; target.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(ROOT / name, target)
             marker = uuid.uuid4().hex
-            (copy / "profile.json").write_text(json.dumps({"private": marker}))
-            (copy / ".env").write_text(marker)
-            (copy / "cases").mkdir(); (copy / "cases" / "notice.eml").write_text(marker)
+            (copy / "profile.json").write_text(json.dumps({"private": marker}), encoding="utf-8")
+            (copy / ".env").write_text(marker, encoding="utf-8")
+            (copy / "cases").mkdir(); (copy / "cases" / "notice.eml").write_text(marker, encoding="utf-8")
             one, two = temporary / "one.zip", temporary / "two.zip"
             self.assertEqual(build_package(one, copy), build_package(two, copy))
             with zipfile.ZipFile(one) as archive:
@@ -102,12 +102,12 @@ class TestSkillIntegrity(unittest.TestCase):
         with self.assertRaises(ValueError): build_package(ROOT / "unsafe.zip")
 
     def test_policy_sources_have_scope_and_provenance(self):
-        data = json.loads((ROOT / "references/policy-sources.json").read_text())
+        data = json.loads((ROOT / "references/policy-sources.json").read_text(encoding="utf-8"))
         self.assertIn("2026-11-12", json.dumps(data))
         self.assertGreaterEqual(len(data["sources"]), 8)
 
     def test_source_manifest_is_complete_in_installation(self):
         from verify_source import verify_source
-        entries = json.loads((ROOT / "docs/source-checksums.json").read_text())["files"]
+        entries = json.loads((ROOT / "docs/source-checksums.json").read_text(encoding="utf-8"))["files"]
         self.assertEqual(set(entries), set(FILES) - {"docs/source-checksums.json"})
         self.assertEqual(verify_source(ROOT), len(entries))
