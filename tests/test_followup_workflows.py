@@ -336,11 +336,11 @@ class TestPSLUpdates(Fixture):
         return raw, blob, psl.prepare_snapshot(raw, commit, blob, minimum_rules=(2, 1))
 
     def setup_source(self):
-        root = self.root/'source'; (root/'references').mkdir(parents=True); (root/'docs').mkdir()
+        root = psl.safe_path(self.root/'source'); (root/'references').mkdir(parents=True); (root/'docs').mkdir()
         _,_,data = self.make_snapshot()
         (root/psl.RELATIVE).write_bytes(data)
         atomic_write_json(root/psl.MANIFEST, {'release':'test','files':{psl.RELATIVE:psl.digest(data)}})
-        return root, data, self.root/'cache'
+        return root, data, psl.safe_path(self.root/'cache')
 
     def test_pinned_snapshot_has_provenance_and_deterministic_bytes(self):
         raw, blob, data = self.make_snapshot()
@@ -371,11 +371,16 @@ class TestPSLUpdates(Fixture):
     def test_interrupted_manifest_write_is_recoverable(self):
         root, old, cache = self.setup_source(); _,_,new = self.make_snapshot('b'*40)
         writer = psl.atomic_write_bytes
+        injected = []
         def failing(path, content):
-            if Path(path) == root/psl.MANIFEST: raise OSError('simulated interruption')
+            if psl.safe_path(path) == root/psl.MANIFEST:
+                injected.append(path)
+                raise OSError('simulated interruption')
             return writer(path, content)
         with patch.object(psl, 'atomic_write_bytes', side_effect=failing):
-            with self.assertRaises(OSError): psl.apply_snapshot(root, cache, new, psl.digest(old))
+            with self.assertRaisesRegex(OSError, 'simulated interruption'):
+                psl.apply_snapshot(root, cache, new, psl.digest(old))
+        self.assertEqual(len(injected), 1)
         self.assertTrue((root/'.psl-update.json').exists())
         self.assertTrue(psl._recover(root, cache))
         self.assertEqual(read_json(root/psl.MANIFEST)['files'][psl.RELATIVE], psl.digest(new))

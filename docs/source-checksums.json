@@ -63,7 +63,7 @@
     "tests/test_brand_registry.py": "fdf0b8f35d6d87eb94bfc4d3778c1e5173a05559cb6e1ad64fb10d5352110ca7",
     "tests/test_case_manager.py": "882082fd727f129a22fe243deaaf0c19dc5c7c566f36f06b5ed817eaa07bfd9b",
     "tests/test_cli.py": "18c1a9e4f305fd9439f228917bb4124325c9fa87f4e4b6f49a95c6836e103e84",
-    "tests/test_followup_workflows.py": "0e9b7b9b49e110c295a798376c55e46738b52b44e05dce0a53c557f9285f7cb9",
+    "tests/test_followup_workflows.py": "cad717da64009d413fb07cabd43f43f838505952329db6bab8ea0b13875f94db",
     "tests/test_liveness_and_eml.py": "3cbbccc02c33491087d8cd9484ec9f65a889ec62c614e472a6a04d7f0483f0df",
     "tests/test_packets.py": "6fe70b1d42c59d4510d60caee1b95d3c78fbe7ba0b83fe1b2927c14e070cbb09",
     "tests/test_recon_and_radar.py": "7850528cf870db920ab1fe720d9b1378ce6e161c483a81cdeae221940158dec5",
