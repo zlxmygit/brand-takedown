@@ -1,154 +1,185 @@
 # brand-takedown
 
-**人工监督的品牌维权取证与投诉草稿 Skill；不是无人值守封站系统。**
+brand-takedown 是一个品牌维权 Skill，用于采集网站证据、生成投诉材料和跟进案件进度。
 
-案件身份、证据快照、投诉审批、真实提交回执和法律提醒独立管理。
-不保证封禁结果，不自动发送邮件、提交表单、购买商品或触发公开存档。
+你可以按品牌管理权利资料，把目标网址、证据、投诉通道和回执归到同一案件。Agent 调用 Python 脚本完成取证和材料整理，你审核后提交，再记录处理结果。
 
-## 环境与安装
+## 功能
 
-Python **3.11+**，Linux/macOS，本机私有 POSIX 文件系统。Python 运行时零第三方包依赖；
-不再依赖写死路径的 curl、dig、whois、openssl 命令。不要在 NFS、共享云盘或多主机上写同一状态目录。
+| 功能 | 用途 |
+| --- | --- |
+| 品牌档案 | 保存主体、联系人、官方域名、授权经销商和知识产权资料 |
+| 网站取证 | 采集页面、网络信息和注册资料，每次生成独立快照与文件校验清单 |
+| 投诉材料 | 按版权、商标、外观设计或欺诈等类型整理主张、证据和附件 |
+| 案件跟进 | 记录工单、补件、反通知和待办，检查目标网址的访问状态 |
+| 域名发现 | 查询证书透明度日志，保留待核实的域名线索 |
+
+## 安装
+
+需要 Python 3.11 或更高版本，以及 Linux 或 macOS。脚本只使用 Python 标准库。
 
 ```bash
 git clone https://github.com/zlxmygit/brand-takedown.git
 cd brand-takedown
 python3 scripts/doctor.py
-python3 -m unittest discover -s tests -v
 ```
 
-将仓库或经过校验的通用包放到宿主真正支持的 Skill 目录。不同 Agent 的安装目录、
-工具名及调度权限不相同；本仓库不宣称固定 Gmail 命令或 `/schedule` 在任意宿主可用。
-详见 [宿主能力契约](references/host-contract.md)。
+诊断结果中的 `ok` 为 `true`，表示本机环境满足运行要求。也可以从 [发布页](https://github.com/zlxmygit/brand-takedown/releases) 下载 ZIP，解压后运行同一命令。
 
-## 安全边界
+将整个 `brand-takedown/` 目录放入 Agent 的 Skill 目录，保持内部文件结构。具体位置取决于所用 Agent，工具接入方式见 [Agent 接入](references/host-contract.md)。
 
-|模块|行为|
-|---|---|
-|品牌与案件|UUID 身份绑定；规范化域名用于同域合并；目录不可跨品牌复用|
-|状态写入|本机线程/进程锁、唯一临时文件、fsync、原子替换、revision 冲突检查|
-|HTTP|每跳白名单及公网地址校验、连接 IP 固定、TLS 校验、大小/时间/跳转限制|
-|取证|每次独立 `CAP-*` 目录；原始字节、响应元数据、报告一起封存；旧清单只验证|
-|存活|检查全部 URL 与关联线索；不把空 DNS、自报停用文字或单页 404 当作整案下线|
-|法律提醒|独立待办；反通知恢复窗口仅做周末调整估算，必须由律师确认|
-|投诉|逐项事实/证据/权利/属地校验；独立人工审批绑定正文、收件目标和附件摘要|
-|邮件|只生成未发送 EML；发件账户认证和真实发送不在本包中|
-|CT|错误与零发现分开；待处置候选持续显示，只有明确人工分类才退出队列|
+## 快速上手
 
-代理、伪装 Referer、自动 Wayback 发布和自动浏览器结账已关闭。
-哈希清单不是可信时间戳、公证或不可篡改存储；同一账户可修改整个数据目录，因此仍需备份、
-访问控制及按案件要求采用外部可信存证。网络出口防火墙应作为第二层防御。
+下面的命令在仓库根目录运行。`.example` 域名用于展示格式，取证时请换成待核实的网址。
 
-## 使用流程
+### 1. 建立品牌档案
 
-### 1. 私有品牌建档
-
-复制 `examples/sample-profile.json` 到仓库外，填写真实资料；示例不含可用于真实投诉的权利凭证。
-`brand_slug` 必须与 `--slug` 一致。证书相对路径在注册时按 `--data-dir` 解析，建议使用绝对路径。
+将示例复制到仓库外，填写品牌主体、联系人、官方域名和权利资料。
 
 ```bash
+mkdir -p "$HOME/.gemini/brand-protection/example-brand"
+cp examples/sample-profile.json "$HOME/.gemini/brand-protection/example-brand/input.json"
 export BRAND_TAKEDOWN_REGISTRY="$HOME/.gemini/brand-protection/registry.json"
-python3 scripts/brand_registry.py validate --profile-file "$HOME/private-profile.json"
-python3 scripts/brand_registry.py init --slug example-brand \
-  --data-dir "$HOME/.gemini/brand-protection/example-brand" --profile-file "$HOME/private-profile.json"
 ```
 
-也可在每个 CLI 子命令之前传 `--registry <path>`。实际数据必须在仓库外；`.gitignore` 只是辅助，
-不是保密保证。不要把档案、证书、案件、生成的邮件或完整审计运行数据提交到 Git。
+编辑 `input.json` 后，校验并注册档案：
 
-### 2. 建案与取证
+```bash
+python3 scripts/brand_registry.py validate \
+  --profile-file "$HOME/.gemini/brand-protection/example-brand/input.json"
+python3 scripts/brand_registry.py init --slug example-brand \
+  --data-dir "$HOME/.gemini/brand-protection/example-brand" \
+  --profile-file "$HOME/.gemini/brand-protection/example-brand/input.json"
+```
+
+`brand_slug` 与 `--slug` 使用同一个值。证书建议填写绝对路径；相对路径按 `--data-dir` 解析。每个品牌使用独立的本机目录，档案、证据和邮件都保存在仓库外。并发写入依赖本机文件锁，因此数据目录应使用本地磁盘，而非 NFS 或同步云盘。
+
+### 2. 建案并取证
 
 ```bash
 python3 scripts/case_manager.py create --slug example-brand \
   --url "https://suspect.example/product" --types COPYRIGHT_CLONE
-# 使用上一步返回的真实 case_dir。
-python3 scripts/recon_target.py run --slug example-brand --case-dir "$CASE_DIR" \
-  --url "https://suspect.example/product"
-python3 scripts/recon_target.py refresh-manifest --slug example-brand --case-dir "$CASE_DIR"
 ```
 
-`.example` 是文档占位域名，不提供真实取证成功样例。`recon_target.py run` 会自动通过 IANA bootstrap 执行域名（含子域名回退注册主域）与有限公网 IP（最多 2 个）RDAP 结构化摘要提取，并在缺失 ASN 时通过 Google DoH 查询 Team Cymru TXT 补充 ASN 线索（仅作托管参考，不作归属定论）。网络失败会返回非零退出码并保存失败记录，
-不会把空页面变成有效取证。截图请通过 `add-evidence --source <file>` 追加为新快照，不要修改旧快照。
-`refresh-manifest` 改为验证命令，发现修改就报错，不能用来接受新哈希。
-
-### 3. 草稿通道、结构化主张与审批
+命令返回 JSON。把其中的 `case_dir` 填入下方变量：
 
 ```bash
-python3 scripts/case_manager.py add-channel --slug example-brand --case-dir "$CASE_DIR" \
-  --channel-id host --channel-class ENFORCEMENT_SLA --category hosting \
-  --provider "Independently verified provider" --endpoint "abuse@provider.example"
+export CASE_DIR="上一步返回的案件目录"
+python3 scripts/recon_target.py run --slug example-brand \
+  --case-dir "$CASE_DIR" --url "https://suspect.example/product"
 ```
 
-`packets.py prepare` 读取私有请求 JSON，字段为：`channel_id`、`route`、`jurisdiction`、`subject`、
-`provider_role`、`scope_reason`、`endpoint_source_url`、`endpoint_verified_by`、`endpoint_verified_at`、
-`authorization_fair_use_review`、`rights_verified_by`、`rights_verified_at`、`claims`。
-核验时间须带时区并在最近 30 天内；这是内部复核期限，不是平台或法律保证。
+每次取证都会生成一个 `CAP-*` 快照目录，保留页面原始字节和采集信息。网络请求失败时，命令返回非零退出码，并保存失败原因。
 
-每个 claim 包含 `kind`、`target_url`、`statement`、`legal_basis`、`comparison_or_observed_facts`、
-`evidence: [{"capture_id": "真实快照ID", "filename": "raw.bin"}]`。
-知识产权主张还需要 `right_index`，指向品牌档案相应权利数组中的项目。
-安全主张另需 `specific_requirement_and_defect`，不能直接复制品牌档案的品类风险描述。
-可参考 `tests/common.py` 中完全合成的请求结构，但不得把测试事实用于真实投诉。
+取证报告还会整理域名注册资料，以及最多 2 个公网 IP 的注册资料。ASN 信息缺失时，会补充查询网络运营方线索。
 
-支持 `COPYRIGHT_NOTICE`、`TRADEMARK_NOTICE`、`DESIGN_NOTICE`、`ABUSE_REPORT`、`DSA_NOTICE`、
-`SAFETY_REFERRAL`、`REGULATORY_FILING`。当前 DMCA 模板只用于经审核的美国版权主张；
-DSA Article 16 路由要求 EU 适用范围和 hosting 角色，不根据英国地址或欧元标价自动认定。
+补充截图或其他文件时，使用 `add-evidence`；检查已有快照时，使用 `refresh-manifest`：
 
 ```bash
-python3 scripts/packets.py --slug example-brand --case-dir "$CASE_DIR" prepare --request-file "$REQUEST_JSON"
-# 展示正文、收件目标、附件和摘要，并获得真实授权人明确同意后：
+python3 scripts/recon_target.py add-evidence --slug example-brand \
+  --case-dir "$CASE_DIR" --url "https://suspect.example/product" \
+  --source "$HOME/evidence/screenshot.png"
+python3 scripts/recon_target.py refresh-manifest \
+  --slug example-brand --case-dir "$CASE_DIR"
+```
+
+`refresh-manifest` 比对原始清单，文件发生变化时会报错。补充材料会另建快照，原快照保持不变。
+
+### 3. 整理投诉材料
+
+先从服务商官网核对投诉入口，再登记通道。以下名称和邮箱需要替换为核实后的信息：
+
+```bash
+python3 scripts/case_manager.py add-channel --slug example-brand \
+  --case-dir "$CASE_DIR" --channel-id host \
+  --channel-class ENFORCEMENT_SLA --category hosting \
+  --provider "服务商名称" --endpoint "abuse@provider.example"
+```
+
+将投诉主张写入请求 JSON。每项主张对应一个目标网址，并引用案件中的证据文件。选择通道时可查阅 [投诉通道](references/channel-playbook.md) 和 [法域与权利类型](references/legal-jurisdictions.md)。
+
+<details>
+<summary>请求 JSON 字段</summary>
+
+| 字段 | 内容 |
+| --- | --- |
+| `channel_id`、`subject` | 通道标识和邮件主题 |
+| `route`、`jurisdiction` | 投诉类型和适用地区 |
+| `provider_role`、`scope_reason` | 服务商角色及适用理由 |
+| `endpoint_source_url` | 服务商官方投诉入口的 HTTPS 来源页 |
+| `endpoint_verified_by`、`endpoint_verified_at` | 联系方式的核验人和核验时间 |
+| `rights_verified_by`、`rights_verified_at` | 权利资料的核验人和核验时间 |
+| `authorization_fair_use_review` | 授权、转售及合理使用等情况的审核记录 |
+| `claims` | 主张数组，每项填写下述字段 |
+
+每项主张包含 `kind`、`target_url`、`statement`、`legal_basis`、`comparison_or_observed_facts` 和 `evidence`。证据引用格式为 `{"capture_id": "快照标识", "filename": "raw.bin"}`。
+
+知识产权主张还需填写 `right_index`，对应品牌档案中权利数组的下标，从 `0` 开始。产品安全主张需填写 `specific_requirement_and_defect`，说明具体要求和观察到的缺陷。
+
+`route` 支持 `COPYRIGHT_NOTICE`、`TRADEMARK_NOTICE`、`DESIGN_NOTICE`、`ABUSE_REPORT`、`DSA_NOTICE`、`SAFETY_REFERRAL` 和 `REGULATORY_FILING`。当前版权通知模板适用于美国；DSA 通知要求地区为 `EU`，服务商角色为 `hosting`。
+
+核验时间使用带时区的 ISO 8601 格式，并保持在最近 30 天内。请求结构示例见 [`tests/common.py`](tests/common.py)，其中的测试数据仅供了解字段格式。
+
+</details>
+
+设置请求文件路径并生成材料：
+
+```bash
+export REQUEST_JSON="$HOME/.gemini/brand-protection/example-brand/request.json"
+python3 scripts/packets.py --slug example-brand --case-dir "$CASE_DIR" \
+  prepare --request-file "$REQUEST_JSON"
+```
+
+### 4. 审核、发送并记录回执
+
+生成结果包含材料目录、`packet_id` 和 `packet_sha256`。检查目录中的 `notice.txt`、收件目标和附件后，将这两个值分别填入 `PACKET_ID` 和 `PACKET_SHA256`。
+
+用户确认这份材料后，记录审批并生成 EML 邮件草稿：
+
+```bash
 python3 scripts/packets.py --slug example-brand --case-dir "$CASE_DIR" approve \
-  --packet-id "$PACKET_ID" --reviewer "实际审核人" --reviewed-digest "$PACKET_SHA256" --confirm-human-review
-python3 scripts/build_eml.py --slug example-brand --case-dir "$CASE_DIR" --packet-id "$PACKET_ID"
+  --packet-id "$PACKET_ID" --reviewer "审核人姓名" \
+  --reviewed-digest "$PACKET_SHA256" --confirm-human-review
+python3 scripts/build_eml.py --slug example-brand --case-dir "$CASE_DIR" \
+  --packet-id "$PACKET_ID"
 ```
 
-审批是本地流程记录，不是数字签名或授权身份认证。邮件带 `X-Unsent: 1`，不执行发送。
-From 头不能替代真实企业发件账户、SPF/DKIM 或 Send-As 权限。任何正文、附件、目标或品牌资料变化
-都需要重新生成和审批。审批超过 7 天需重审。
+在邮箱客户端打开草稿，使用已配置的企业邮箱发送。材料、收件目标或品牌资料变更后，重新生成并审核；审批记录超过 7 天也需重审。
 
-只有实际人工发送/提交后，才能记录：
+发送后，将回执编号填入 `ACTUAL_RECEIPT`，实际发送时间填入 `ACTUAL_SENT_AT`。时间应包含时区。
 
 ```bash
-python3 scripts/case_manager.py submit --slug example-brand --case-dir "$CASE_DIR" \
-  --channel-id host --packet-id "$PACKET_ID" --submission-ref "$ACTUAL_RECEIPT" --sent-at "$ACTUAL_SENT_AT"
+python3 scripts/case_manager.py submit --slug example-brand \
+  --case-dir "$CASE_DIR" --channel-id host --packet-id "$PACKET_ID" \
+  --submission-ref "$ACTUAL_RECEIPT" --sent-at "$ACTUAL_SENT_AT"
 ```
 
-### 4. 巡检、补件和反通知
-
-`check_liveness.py patrol --slug <slug>` 逐案隔离错误，可附加 `--check-rdap` 同步检查注册局 `clienthold`/`serverhold` 冻结线索（仍需人工复核，不自动结案）。`case_manager.py due --slug <slug>` 同时输出
-跟进、补件、Tier-3 复核和法律待办。`escalate` 只计划草稿，不虚构已发送的升级事件。
-`counter-notice` 要求 `--source-ref`；`--provider-received-at` 和 `--provider-timezone` 已知时才做
-10–14 工作日的**非法律截止估算**。未知起算日就立刻请求律师核对，不伪造具体期限。
-`resolve-legal` 需要审核人和书面处置理由，网络巡检永远不能代替它。
-
-### 5. 雷达与封装
+### 5. 跟进案件
 
 ```bash
+python3 scripts/check_liveness.py patrol --slug example-brand
+python3 scripts/case_manager.py due --slug example-brand
 python3 scripts/ct_radar.py --slug example-brand
-python3 scripts/package_skill.py --out /tmp/brand-takedown-reviewed.zip
 ```
 
-CT 候选持续保留到 `--triage-domain ... --decision ... --reviewer ... --rationale ...`。
-打包器只收录显式白名单文件，附 SHA256SUMS；不会递归打包私有运行目录。打包不是发布 Release。
+这三个命令分别检查网址、列出待办和查询域名线索。待办包括催办、补件、升级复核和反通知处理。域名线索会保留到审核人分类处理。
 
-## 兼容性与迁移
+巡检命令可附加 `--check-rdap`，同时查询域名注册状态。结果中的 `clienthold` 和 `serverhold` 可用于核对域名是否被暂停解析。
 
-这是安全性优先的破坏性接口修订：Python 最低版本变为 3.11；案件 schema 为 2；
-旧的 `--status SUBMITTED`、任意 `--case-dir`、未审批 EML CLI、代理和自动归档路径不再接受。
+使用 `update-channel` 更新工单，用 `escalate` 准备下一轮跟进。收到反通知后，使用 `counter-notice` 保存来源邮件和收件时间，再按 [反通知处理](references/escalation-and-counter-notice.md) 核对后续事项。各命令的参数可通过 `--help` 查看。
 
-**不自动就地迁移历史案件。** 先完整备份原私有目录和注册表，在隔离副本上审查原品牌、目标、
-提交回执和法律待办；使用新的私有目录及新的注册表重新建档、建案。旧证据只能作为标明来源的
-历史文件通过 `add-evidence` 引入，不能把导入时间冒充原取证时间，也不能把旧哈希重新认定为真实。
-旧反通知须优先人工核对并录入独立待办；旧邮件回执单独保留。历史上已被覆盖的证据无法由代码恢复。
+## 迁移已有案件
 
-## 验证与限制
+当前案件格式为 schema 2。迁移时先备份原目录和注册表，再使用新的私有目录建档、建案。通过 `add-evidence` 导入历史材料，保留原始来源、取证时间和邮件回执。未处理的反通知需要一并录入待办。
+
+## 开发与测试
 
 ```bash
 python3 -m compileall -q scripts tests
-python3 scripts/doctor.py
 python3 -m unittest discover -s tests -v
+python3 scripts/package_skill.py --out /tmp/brand-takedown.zip
 ```
 
-测试使用合成品牌、模拟外部响应和仅绑定 loopback 的本地 HTTP 服务；不发送真实投诉。
-见 [39 项审计整改映射](docs/audit-remediation.md) 和 [安全政策](SECURITY.md)。
-真实 Gmail、浏览器、支付平台、监管门户、各法域司法程序仍需独立集成/专业验证。
+测试覆盖案件隔离、并发写入、网络访问、证据校验、审批和命令行流程。打包器按文件清单收录源码和文档，并生成 `SHA256SUMS.txt`。
+
+开发说明见 [贡献指南](CONTRIBUTING.md)，数据存储要求见 [安全说明](SECURITY.md)。
