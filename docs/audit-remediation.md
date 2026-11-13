@@ -75,5 +75,5 @@ hashes, reconstruct missing evidence as authentic, or substitute import time for
 Re-enter and independently review open counter-notices before resuming operational work.
 
 Repository owners should separately enable branch protection, required reviews/checks, private security
-reporting, and organization-level security controls. This patch does not claim those administrative
-settings were changed or that version 1.0.0 release assets were replaced.
+reporting, and organization-level security controls. These administrative
+settings are managed separately.

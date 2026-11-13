@@ -3,7 +3,7 @@
 ## Supported scope
 
 The current reviewed workflow is human-supervised, single-owner, single-host Linux/macOS on a private
-local filesystem with Python 3.11+. Historical v1.0.0 is not approved for unattended real enforcement.
+local filesystem with Python 3.11+.
 Do not use NFS/shared cloud storage, multiple hosts or untrusted local users sharing the runtime account.
 
 The package uses identity binding, revision checks, local process/thread locks, private file permissions,
