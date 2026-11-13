@@ -120,6 +120,95 @@ class TestRecon(Fixture):
         with patch.object(recon, "fetch", return_value=result):
             self.assertFalse(recon.query_rdap("suspect.example")["ok"])
 
+    def test_domain_rdap_candidates_handles_subdomains_and_second_level_tlds(self):
+        self.assertEqual(recon.domain_rdap_candidates("pay.bad.example"), ["pay.bad.example", "bad.example"])
+        self.assertEqual(recon.domain_rdap_candidates("pay.evil.co.uk"), ["pay.evil.co.uk", "evil.co.uk"])
+
+    def test_rdap_subdomain_falls_back_to_parent_and_summarizes(self):
+        bootstrap = FetchResult("https://data.iana.org/rdap/dns.json", 200, {},
+                                json.dumps({"services": [[["example"], ["https://rdap.provider.example/"]]]}).encode(), "93.184.216.34", ())
+        not_found = FetchResult("https://rdap.provider.example/domain/shop.suspect.example", 404, {}, b"{}", "93.184.216.34", ())
+        rdap_doc = {
+            "objectClassName": "domain",
+            "ldhName": "suspect.example",
+            "status": ["client hold"],
+            "events": [{"eventAction": "registration", "eventDate": "2026-01-01T00:00:00Z"}],
+            "nameservers": [{"ldhName": "NS1.PROVIDER.EXAMPLE"}],
+            "entities": [{
+                "roles": ["registrar"],
+                "publicIds": [{"type": "IANA Registrar ID", "identifier": "9999"}],
+                "vcardArray": ["vcard", [["fn", {}, "text", "Example Registrar Inc."]]],
+                "entities": [{
+                    "roles": ["abuse"],
+                    "vcardArray": ["vcard", [
+                        ["email", {}, "text", "mailto:abuse@registrar.example"],
+                        ["tel", {}, "text", "tel:+1.5550100"],
+                    ]],
+                }],
+            }],
+        }
+        ok_resp = FetchResult("https://rdap.provider.example/domain/suspect.example", 200, {}, json.dumps(rdap_doc).encode(), "93.184.216.34", ())
+        with patch.object(recon, "fetch", side_effect=[bootstrap, not_found, ok_resp]):
+            res = recon.query_rdap("shop.suspect.example")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["requested_host"], "shop.suspect.example")
+        self.assertEqual(res["queried_domain"], "suspect.example")
+        self.assertEqual(res["summary"]["registrar"], "Example Registrar Inc.")
+        self.assertEqual(res["summary"]["registrar_iana_id"], "9999")
+        self.assertEqual(res["summary"]["abuse_emails"], ["abuse@registrar.example"])
+        self.assertEqual(res["summary"]["abuse_phones"], ["+1.5550100"])
+        self.assertEqual(res["summary"]["name_servers"], ["ns1.provider.example"])
+        self.assertEqual(res["summary"]["status_codes"], ["clienthold"])
+
+    def test_ip_rdap_with_cymru_doh_asn_fallback(self):
+        v4_bootstrap = FetchResult(
+            "https://data.iana.org/rdap/ipv4.json", 200, {},
+            json.dumps({"services": [
+                [["93.0.0.0/8"], ["https://rdap.broad.example/"]],
+                [["93.184.0.0/16"], ["https://rdap.ripe.example/"]],
+            ]}).encode(), "93.184.216.34", ()
+        )
+        ip_doc = {
+            "objectClassName": "ip network",
+            "handle": "NET-93-184-216-0-1",
+            "name": "EDGECAST-NETBLK",
+            "country": "US",
+            "cidr0_cidrs": [{"v4prefix": "93.184.216.0", "length": 24}],
+            "entities": [{"roles": ["abuse"], "vcardArray": ["vcard", [["fn", {}, "text", "Example NOC"], ["email", {}, "text", "abuse@ripe-net.example"]]]}],
+        }
+        ip_resp = FetchResult("https://rdap.ripe.example/ip/93.184.216.34", 200, {}, json.dumps(ip_doc).encode(), "93.184.216.34", ())
+        doh_resp = FetchResult("https://dns.google/resolve?name=34.216.184.93.origin.asn.cymru.com&type=TXT", 200, {},
+                               json.dumps({"Status": 0, "Answer": [{"type": 16, "data": "15133 | 93.184.216.0/24 | US | arin | 2008-06-02"}]}).encode(), "8.8.8.8", ())
+        with patch.object(recon, "fetch", side_effect=[v4_bootstrap, ip_resp, doh_resp]):
+            res = recon.query_ip_rdap("93.184.216.34")
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["source"], "https://rdap.ripe.example/ip/93.184.216.34")
+        self.assertEqual(res["asn_source"], "CYMRU_DOH_TXT")
+        self.assertEqual(res["use"], "HOSTING_HINT_NOT_PROOF_OF_ATTRIBUTION")
+        self.assertFalse(res["trusted_as_instructions"])
+        self.assertEqual(res["summary"]["asns"], ["AS15133"])
+        self.assertEqual(res["summary"]["abuse_emails"], ["abuse@ripe-net.example"])
+
+    def test_non_public_ip_excluded_from_ip_rdap_and_asn(self):
+        with patch.object(recon, "fetch") as fetch:
+            for ip in ("127.0.0.1", "10.0.0.1", "::ffff:127.0.0.1"):
+                self.assertFalse(recon.query_ip_rdap(ip)["ok"])
+                self.assertFalse(recon.query_ip_asn_doh(ip)["ok"])
+            self.assertEqual(recon.query_ip_intel(["127.0.0.1", "not-an-ip"]), [])
+        fetch.assert_not_called()
+
+    def test_run_recon_records_bounded_ip_intel(self):
+        ip_hint = [{"ok": True, "ip": "93.184.216.34", "asn_source": "CYMRU_DOH_TXT", "summary": {"asns": ["AS15133"]},
+                    "use": "HOSTING_HINT_NOT_PROOF_OF_ATTRIBUTION", "trusted_as_instructions": False}]
+        with patch.object(recon, "query_direct_dns", return_value={"A": ["93.184.216.34", "93.184.216.35", "93.184.216.36"], "AAAA": [], "dns_query_ok": True}), \
+             patch.object(recon, "query_rdap", return_value={"ok": True}), \
+             patch.object(recon, "query_ip_intel", return_value=ip_hint) as qip, \
+             patch.object(recon, "fetch", return_value=FetchResult("https://suspect.example/product", 200, {}, b"hello", "93.184.216.34", ())):
+            report = recon.run_recon("https://suspect.example/product", self.case)
+        qip.assert_called_once()
+        self.assertEqual(report["ip_intel"], ip_hint)
+        self.assertTrue(recon.verify_capture(self.case, report["capture_id"])["files"])
+
 
 class TestRadar(Fixture):
     def test_failure_not_successful_empty_scan(self):

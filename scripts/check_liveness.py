@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 import sys
 
-from brand_registry import DEFAULT_REGISTRY_PATH, check_target, load_brand_profile, profile_allowlist, utc_now
+from brand_registry import DEFAULT_REGISTRY_PATH, check_target, load_brand_profile, normalize_hostname, profile_allowlist, utc_now
 from case_manager import assert_case_brand, case_profile, load_case, mutate_case
-from recon_target import query_direct_dns
+from recon_target import query_direct_dns, query_rdap
 from safe_http import fetch
 
 PLATFORM_TAKEDOWN_BANNERS = ("sorry, this shop is currently unavailable", "this store is unavailable", "this account has been suspended", "website has been suspended", "store has been closed")
@@ -50,7 +50,8 @@ def classify_liveness(http_status: int, html: str, dns_ips: list[str], whois_sta
     text = _visible_html_text(html)
     matches = [k for k in brand_keywords if isinstance(k, str) and k.strip() and k.lower() in text]
     banner = any(b in text for b in PLATFORM_TAKEDOWN_BANNERS)
-    if any(s.lower() in ("clienthold", "serverhold", "redemptionperiod") for s in whois_statuses):
+    normalized_statuses = {str(s).strip().lower().replace(" ", "") for s in whois_statuses if str(s).strip()}
+    if normalized_statuses & {"clienthold", "serverhold", "redemptionperiod"}:
         return {"verdict": "DOWN_CANDIDATE_REVIEW", "reason": "Registration status is a lead requiring independent review"}
     if banner or http_status >= 400:
         return {"verdict": "DOWN_CANDIDATE_REVIEW", "reason": "Page/status signal is not independent proof of a platform takedown"}
@@ -61,7 +62,7 @@ def classify_liveness(http_status: int, html: str, dns_ips: list[str], whois_sta
             "infrastructure_changed_hint": changed, "reason": "Observed page content only; not an infringement or operator-attribution conclusion"}
 
 
-def probe_case(case_dir: Path, brand_keywords: list[str], proxy=None, referer=None) -> dict:
+def probe_case(case_dir: Path, brand_keywords: list[str], proxy=None, referer=None, *, check_rdap: bool = False) -> dict:
     data = load_case(case_dir)
     profile = case_profile(case_dir)
     if proxy or referer:
@@ -69,23 +70,42 @@ def probe_case(case_dir: Path, brand_keywords: list[str], proxy=None, referer=No
     urls = list(data["target_urls"])
     urls.extend("https://" + lead["domain"] + "/" for lead in data["linked_payment_cloak_domains"])
     results = []
-    dns_cache = {}
+    dns_cache: dict[str, dict] = {}
+    rdap_cache: dict[str, dict] = {}
     for url in dict.fromkeys(urls):
+        rdap_meta: dict = {}
+        rdap_statuses: list[str] = []
         try:
             clean = check_target(url, profile)
-            from brand_registry import normalize_hostname
             host = normalize_hostname(clean)
             if host not in dns_cache:
                 dns_cache[host] = query_direct_dns(host)
             dns = dns_cache[host]
+            if check_rdap:
+                if host not in rdap_cache:
+                    try:
+                        rdap_cache[host] = query_rdap(host)
+                    except (ValueError, OSError) as rdap_exc:
+                        rdap_cache[host] = {"ok": False, "error": str(rdap_exc)}
+                rdap_info = rdap_cache[host]
+                if rdap_info.get("ok"):
+                    rdap_statuses = list(rdap_info.get("summary", {}).get("status_codes", []))
+                    rdap_meta["rdap_statuses"] = rdap_statuses
+                    if rdap_info.get("queried_domain"):
+                        rdap_meta["rdap_queried_domain"] = rdap_info["queried_domain"]
+                else:
+                    rdap_meta["rdap_statuses"] = []
+                    if rdap_info.get("error"):
+                        rdap_meta["rdap_error"] = rdap_info["error"]
             response = fetch(clean, profile_allowlist(profile))
             ips = dns.get("A", []) + dns.get("AAAA", [])
             observation = classify_liveness(response.status, response.body.decode("utf-8", errors="replace"), ips,
-                [], brand_keywords, data["infrastructure_baseline"].get("ips", []), dns.get("dns_query_ok", False))
+                rdap_statuses, brand_keywords, data["infrastructure_baseline"].get("ips", []), dns.get("dns_query_ok", False))
             results.append({"target_url": url, "final_url": response.url, "http_status": response.status,
-                            "checked_at_utc": utc_now(), **observation})
+                            "checked_at_utc": utc_now(), **rdap_meta, **observation})
         except (ValueError, OSError) as exc:
-            results.append({"target_url": url, "checked_at_utc": utc_now(), "verdict": "UNKNOWN_REQUIRES_REVIEW", "error": str(exc)})
+            results.append({"target_url": url, "checked_at_utc": utc_now(), "verdict": "UNKNOWN_REQUIRES_REVIEW",
+                            **rdap_meta, "error": str(exc)})
     active = any(r["verdict"] in ("CONTENT_PRESENT", "CONTENT_CHANGED_REVIEW") for r in results)
     record = {"checked_at_utc": utc_now(), "case_id": data["case_id"], "targets": results,
               "verdict": "CONTENT_OBSERVED" if active else "REVIEW_REQUIRED",
@@ -98,13 +118,13 @@ def probe_case(case_dir: Path, brand_keywords: list[str], proxy=None, referer=No
     return {**record, "case_status_after_probe": after["status"]}
 
 
-def patrol(brand_dir: Path, keywords: list[str]) -> dict:
+def patrol(brand_dir: Path, keywords: list[str], *, check_rdap: bool = False) -> dict:
     results, errors = [], []
     for child in sorted((brand_dir / "cases").iterdir()):
         if not child.is_dir():
             continue
         try:
-            results.append(probe_case(child, keywords))
+            results.append(probe_case(child, keywords, check_rdap=check_rdap))
         except (ValueError, OSError, KeyError) as exc:
             errors.append({"case_dir": str(child), "error": str(exc)})
     failed_targets = sum(bool(t.get("error")) for result in results for t in result["targets"])
@@ -117,6 +137,7 @@ def _main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     for name in ("probe", "patrol"):
         p = sub.add_parser(name); p.add_argument("--slug", required=True)
+        p.add_argument("--check-rdap", action="store_true", help="Also query bounded IANA RDAP registration status hints")
         if name == "probe":
             p.add_argument("--case-dir", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -124,9 +145,9 @@ def _main(argv=None) -> int:
     keywords = profile.get("keyword_watch_patterns") or [profile["brand_name"]]
     if args.cmd == "probe":
         assert_case_brand(args.case_dir, directory)
-        result = probe_case(args.case_dir, keywords)
+        result = probe_case(args.case_dir, keywords, check_rdap=args.check_rdap)
     else:
-        result = patrol(directory, keywords)
+        result = patrol(directory, keywords, check_rdap=args.check_rdap)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return int(bool(result.get("errors")) or bool(result.get("failed_target_count")) or any(t.get("error") for t in result.get("targets", [])))
 

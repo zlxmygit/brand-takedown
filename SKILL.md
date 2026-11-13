@@ -67,7 +67,10 @@ python3 <SKILL_DIR>/scripts/recon_target.py refresh-manifest --slug <slug> --cas
 ```
 
 Use [recon_target.py](./scripts/recon_target.py) for bounded, public-address-pinned
-HTTP and IANA-discovered RDAP. Each run creates a separate `CAP-*` capture.
+HTTP, IANA-discovered domain/IP RDAP (including parent-domain candidate fallback and
+structured registrar/abuse summaries), and bounded Team Cymru DoH ASN leads.
+Each run creates a separate `CAP-*` capture. IP/ASN records remain unverified
+hosting leads (`HOSTING_HINT_NOT_PROOF_OF_ATTRIBUTION`), never attribution proof.
 `CAPTURED` means bytes were obtained, not that the allegation is proven.
 `FAILED`/`PARTIAL` captures cannot support packet claims. A modified/missing file or
 manifest is an integrity error; `refresh-manifest` verifies and never re-signs it.
@@ -106,7 +109,8 @@ A prepared draft is not SUBMITTED, and a planned escalation does not reset a clo
 
 ## 4. Feedback, liveness and legal review
 
-Use [check_liveness.py](./scripts/check_liveness.py) to observe every case URL and
+Use [check_liveness.py](./scripts/check_liveness.py) (optionally with `--check-rdap`
+for `clienthold`/`serverhold` status leads) to observe every case URL and
 linked lead. Unknown/changed/down-looking signals require review; no probe closes
 an entire case. Recheck newly authorized domains and review per-case errors.
 Use `update-channel` for verified feedback and `due` for internal follow-ups,

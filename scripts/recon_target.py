@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import re
-import socket
-import ipaddress
 import sys
 import uuid
 from urllib.parse import quote
@@ -15,12 +14,36 @@ from urllib.parse import quote
 from brand_registry import (DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
                             normalize_hostname, profile_allowlist, utc_now)
 from case_manager import assert_case_brand, case_profile, load_case, mutate_case
-from safe_http import fetch, public_addresses, resolve_addresses
+from safe_http import fetch, resolve_addresses
 from storage import atomic_write_bytes, atomic_write_json, locked, private_dir, read_json, safe_path
 
 _atomic_write_json = atomic_write_json
 _utc_now_iso = utc_now
 EXCLUDED_MANIFEST_FILES = {"evidence-manifest.json"}
+_EMAIL_RE = re.compile(r"\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,24})\b")
+_COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES = {
+    "co.uk", "org.uk", "me.uk", "com.au", "net.au", "org.au",
+    "com.cn", "net.cn", "org.cn", "com.br", "com.hk", "co.jp",
+}
+
+
+def _dedup_preserve(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        val = item.strip()
+        if val and val not in seen:
+            seen.add(val)
+            out.append(val)
+    return out
+
+
+def _is_global_public_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    transition = isinstance(ip_obj, ipaddress.IPv6Address) and (
+        ip_obj.ipv4_mapped is not None or ip_obj.sixtofour is not None or ip_obj.teredo is not None
+        or ip_obj in ipaddress.ip_network("64:ff9b::/96") or ip_obj in ipaddress.ip_network("64:ff9b:1::/48")
+    )
+    return bool(ip_obj.is_global and not ip_obj.is_multicast and not ip_obj.is_unspecified and not transition)
 
 
 def extract_storefront_fingerprints(html: str, headers_text: str = "") -> dict:
@@ -56,26 +79,363 @@ def query_direct_dns(host: str) -> dict:
                 "authoritative": False, "negative_result_verified": False, "error": str(exc)}
 
 
+def _extract_vcard_field(vcard_array: object, field_name: str) -> list[str]:
+    values: list[str] = []
+    if not isinstance(vcard_array, list) or len(vcard_array) < 2 or not isinstance(vcard_array[1], list):
+        return values
+    target = field_name.lower()
+    for prop in vcard_array[1]:
+        if not isinstance(prop, list) or len(prop) < 4 or str(prop[0]).lower() != target:
+            continue
+        val = prop[3]
+        if isinstance(val, str) and val.strip():
+            values.append(val.strip())
+        elif isinstance(val, list):
+            joined = " ".join(str(x).strip() for x in val if str(x).strip())
+            if joined:
+                values.append(joined)
+    return values
+
+
+def _walk_rdap_entities(entities: object, inherited_roles: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], dict]]:
+    out: list[tuple[tuple[str, ...], dict]] = []
+    if not isinstance(entities, list):
+        return out
+    for ent in entities:
+        if not isinstance(ent, dict):
+            continue
+        own_roles = tuple(str(r).lower() for r in ent.get("roles", []) if str(r).strip())
+        roles = own_roles or inherited_roles
+        out.append((roles, ent))
+        if isinstance(ent.get("entities"), list):
+            out.extend(_walk_rdap_entities(ent.get("entities"), roles))
+    return out
+
+
+def parse_rdap_domain_json(payload: dict) -> dict:
+    """Extract untrusted registration hints from a domain RDAP JSON response."""
+    if not isinstance(payload, dict) or not payload:
+        return {"rdap_available": False, "ldh_name": "", "registrar": "", "registrar_iana_id": "",
+                "creation_date": "", "expiration_date": "", "abuse_emails": [], "abuse_phones": [],
+                "name_servers": [], "status_codes": []}
+    registrar = iana_id = ""
+    abuse_emails: list[str] = []
+    abuse_phones: list[str] = []
+    for roles, ent in _walk_rdap_entities(payload.get("entities")):
+        vcard = ent.get("vcardArray")
+        fns = _extract_vcard_field(vcard, "fn") or _extract_vcard_field(vcard, "org")
+        if "registrar" in roles and fns and not registrar:
+            registrar = fns[0]
+        if "registrar" in roles and not iana_id:
+            for pid in ent.get("publicIds", []) or []:
+                if isinstance(pid, dict) and "iana" in str(pid.get("type", "")).lower():
+                    ident = str(pid.get("identifier", "")).strip()
+                    if ident:
+                        iana_id = ident
+                        break
+        if "abuse" in roles:
+            for raw_em in _extract_vcard_field(vcard, "email"):
+                abuse_emails.extend(em.lower() for em in _EMAIL_RE.findall(raw_em.replace("mailto:", "")))
+            for raw_tel in _extract_vcard_field(vcard, "tel"):
+                tel_clean = raw_tel.replace("tel:", "").strip()
+                if tel_clean:
+                    abuse_phones.append(tel_clean)
+    creation_date = expiration_date = ""
+    for ev in payload.get("events", []) or []:
+        if not isinstance(ev, dict):
+            continue
+        action = str(ev.get("eventAction", "")).lower()
+        date_val = str(ev.get("eventDate", "")).strip()
+        if not date_val:
+            continue
+        if action in ("registration", "registered") and not creation_date:
+            creation_date = date_val
+        elif action in ("expiration", "soft expiration") and not expiration_date:
+            expiration_date = date_val
+    name_servers = [
+        str(ns.get("ldhName") or ns.get("unicodeName") or "").strip().lower().rstrip(".")
+        for ns in (payload.get("nameservers", []) or [])
+        if isinstance(ns, dict) and str(ns.get("ldhName") or ns.get("unicodeName") or "").strip()
+    ]
+    status_codes = [str(s).strip().lower().replace(" ", "") for s in (payload.get("status", []) or []) if str(s).strip()]
+    return {
+        "rdap_available": True,
+        "ldh_name": str(payload.get("ldhName") or "").strip().lower(),
+        "registrar": registrar,
+        "registrar_iana_id": iana_id,
+        "creation_date": creation_date,
+        "expiration_date": expiration_date,
+        "abuse_emails": _dedup_preserve(abuse_emails),
+        "abuse_phones": _dedup_preserve(abuse_phones),
+        "name_servers": _dedup_preserve(name_servers),
+        "status_codes": _dedup_preserve(status_codes),
+    }
+
+
+def parse_rdap_ip_json(payload: dict, queried_ip: str = "") -> dict:
+    """Extract untrusted hosting/ASN hints from an IP network RDAP JSON response."""
+    if not isinstance(payload, dict) or not payload:
+        return {}
+    holder = ""
+    abuse_emails: list[str] = []
+    fallback_emails: list[str] = []
+    for roles, ent in _walk_rdap_entities(payload.get("entities")):
+        vcard = ent.get("vcardArray")
+        fns = _extract_vcard_field(vcard, "fn") or _extract_vcard_field(vcard, "org")
+        if fns and not holder and any(r in roles for r in ("registrant", "administrative", "technical", "noc")):
+            holder = fns[0]
+        elif fns and not holder:
+            holder = fns[0]
+        for raw_em in _extract_vcard_field(vcard, "email"):
+            for em in _EMAIL_RE.findall(raw_em.replace("mailto:", "")):
+                (abuse_emails if ("abuse" in roles or "abuse" in em.lower()) else fallback_emails).append(em.lower())
+    asns = [f"AS{str(a).lstrip('ASas')}" for a in (payload.get("arin_originas0_originautnums", []) or []) if str(a).strip()]
+    for remark in payload.get("remarks", []) or []:
+        if isinstance(remark, dict):
+            for desc in remark.get("description", []) or []:
+                asns.extend(m.upper() for m in re.findall(r"\bAS\d{2,10}\b", str(desc), re.IGNORECASE))
+    cidrs = [
+        f"{c.get('v4prefix') or c.get('v6prefix')}/{c.get('length')}"
+        for c in (payload.get("cidr0_cidrs", []) or [])
+        if isinstance(c, dict) and (c.get("v4prefix") or c.get("v6prefix")) and c.get("length") is not None
+    ]
+    return {
+        "ip": queried_ip or str(payload.get("startAddress", "")).strip(),
+        "handle": str(payload.get("handle", "")).strip(),
+        "network_name": str(payload.get("name", "")).strip(),
+        "country": str(payload.get("country", "")).strip().upper(),
+        "holder": holder,
+        "cidrs": _dedup_preserve(cidrs),
+        "asns": _dedup_preserve(asns),
+        "abuse_emails": _dedup_preserve(abuse_emails or fallback_emails),
+    }
+
+
+def domain_rdap_candidates(host: str) -> list[str]:
+    """Generate ordered domain candidates from exact hostname up to registrable parent."""
+    clean = normalize_hostname(host)
+    if not clean or "." not in clean:
+        return []
+    labels = clean.split(".")
+    candidates: list[str] = []
+    for idx in range(0, max(1, len(labels) - 1)):
+        sub = ".".join(labels[idx:])
+        if "." in sub and sub not in _COMMON_SECOND_LEVEL_PUBLIC_SUFFIXES:
+            candidates.append(sub)
+    return candidates
+
+
+def _find_domain_rdap_service(bootstrap_doc: dict, domain: str) -> str:
+    services = bootstrap_doc.get("services") if isinstance(bootstrap_doc, dict) else None
+    if not isinstance(services, list):
+        raise ValueError("Invalid IANA DNS RDAP bootstrap format")
+    tld = domain.split(".")[-1]
+    return next(
+        url for zones, urls in services
+        if isinstance(zones, list) and tld in zones and isinstance(urls, list)
+        for url in urls if isinstance(url, str) and url.startswith("https://")
+    )
+
+
+def _find_ip_rdap_service(bootstrap_doc: dict, ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+    services = bootstrap_doc.get("services") if isinstance(bootstrap_doc, dict) else None
+    if not isinstance(services, list):
+        raise ValueError("Invalid IANA IP RDAP bootstrap format")
+    best_prefix = -1
+    best_url = ""
+    for cidrs, urls in services:
+        if not isinstance(cidrs, list) or not isinstance(urls, list):
+            continue
+        https_url = next((u for u in urls if isinstance(u, str) and u.startswith("https://")), "")
+        if not https_url:
+            continue
+        for raw_cidr in cidrs:
+            try:
+                net = ipaddress.ip_network(str(raw_cidr), strict=False)
+            except ValueError:
+                continue
+            if net.version == ip_obj.version and ip_obj in net and net.prefixlen > best_prefix:
+                best_prefix = net.prefixlen
+                best_url = https_url
+    if not best_url:
+        raise ValueError("No matching authoritative RIR RDAP service")
+    return best_url
+
+
 def query_rdap(host: str) -> dict:
-    """Discover authoritative RDAP service from IANA. No unverified WHOIS scraping."""
+    """Discover authoritative RDAP service from IANA with parent-domain fallback."""
     host = normalize_hostname(host)
     if not host:
         raise ValueError("Invalid RDAP domain")
+    candidates = domain_rdap_candidates(host)
+    if not candidates:
+        return {"ok": False, "requested_host": host, "queried_domain": host,
+                "error": "No registrable RDAP candidate", "manual_lookup_required": True}
     try:
         bootstrap = fetch("https://data.iana.org/rdap/dns.json", max_bytes=2 * 1024 * 1024)
         if bootstrap.status != 200:
             raise ValueError("IANA bootstrap unavailable")
-        service = next(url for zones, urls in json.loads(bootstrap.body)["services"] if host.split(".")[-1] in zones for url in urls if url.startswith("https://"))
-        response = fetch(service.rstrip("/") + "/domain/" + quote(host, safe=""))
-        if response.status != 200:
-            raise ValueError(f"RDAP HTTP {response.status}; subdomains may require manual registered-domain lookup")
-        document = json.loads(response.body)
-        if not isinstance(document, dict) or document.get("objectClassName") != "domain":
-            raise ValueError("Invalid RDAP domain response")
-        return {"ok": True, "source": response.url, "queried_domain": host, "document": document,
-                "use": "REGISTRATION_HINT_NOT_PROOF_OF_ABUSE"}
-    except (ValueError, OSError, StopIteration, KeyError, TypeError) as exc:
-        return {"ok": False, "queried_domain": host, "error": str(exc), "manual_lookup_required": True}
+        bootstrap_doc = json.loads(bootstrap.body)
+        if not isinstance(bootstrap_doc, dict) or not isinstance(bootstrap_doc.get("services"), list):
+            raise ValueError("Invalid IANA RDAP bootstrap document")
+        last_error = "No matching authoritative RDAP service"
+        for candidate in candidates:
+            try:
+                service = _find_domain_rdap_service(bootstrap_doc, candidate)
+            except StopIteration:
+                last_error = f"No authoritative RDAP service for {candidate}"
+                continue
+            response = fetch(service.rstrip("/") + "/domain/" + quote(candidate, safe=""))
+            if response.status != 200:
+                last_error = f"RDAP HTTP {response.status} for {candidate}"
+                continue
+            document = json.loads(response.body)
+            if not isinstance(document, dict) or document.get("errorCode") or document.get("objectClassName") != "domain":
+                last_error = f"Invalid RDAP domain response for {candidate}"
+                continue
+            return {
+                "ok": True,
+                "source": response.url,
+                "requested_host": host,
+                "queried_domain": candidate,
+                "document": document,
+                "summary": parse_rdap_domain_json(document),
+                "use": "REGISTRATION_HINT_NOT_PROOF_OF_ABUSE",
+            }
+        raise ValueError(f"{last_error}; subdomains may require manual registered-domain lookup")
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return {"ok": False, "requested_host": host, "queried_domain": host, "error": str(exc), "manual_lookup_required": True}
+
+
+def _parse_cymru_txt_record(txt_line: str) -> dict:
+    cleaned = (txt_line or "").strip().strip('"')
+    parts = [p.strip() for p in cleaned.split("|")]
+    if len(parts) < 3 or not parts[0]:
+        return {}
+    asns = [f"AS{tok.lstrip('ASas')}" for tok in parts[0].split() if tok.strip().isdigit()]
+    if not asns:
+        return {}
+    return {
+        "asns": _dedup_preserve(asns),
+        "cidr": parts[1] if len(parts) > 1 else "",
+        "country": parts[2].upper() if len(parts) > 2 else "",
+        "rir": parts[3].lower() if len(parts) > 3 else "",
+    }
+
+
+def query_ip_asn_doh(ip_str: str) -> dict:
+    """Resolve Team Cymru origin ASN hints via bounded HTTPS DoH JSON (no dig binary)."""
+    try:
+        ip_obj = ipaddress.ip_address(str(ip_str).strip())
+    except ValueError:
+        return {"ok": False, "error": "Invalid IP address"}
+    if not _is_global_public_ip(ip_obj):
+        return {"ok": False, "error": "Non-public IP excluded from ASN lookup"}
+    rev = ip_obj.reverse_pointer
+    if rev.endswith(".in-addr.arpa"):
+        query_name = rev[:-len(".in-addr.arpa")] + ".origin.asn.cymru.com"
+    elif rev.endswith(".ip6.arpa"):
+        query_name = rev[:-len(".ip6.arpa")] + ".origin6.asn.cymru.com"
+    else:
+        return {"ok": False, "error": "Unsupported reverse pointer"}
+    try:
+        resp = fetch("https://dns.google/resolve?name=" + quote(query_name, safe="") + "&type=TXT", max_bytes=65536)
+        if resp.status != 200:
+            return {"ok": False, "error": f"DoH ASN lookup HTTP {resp.status}"}
+        payload = json.loads(resp.body)
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "Invalid DoH JSON payload"}
+        for answer in payload.get("Answer", []) or []:
+            if isinstance(answer, dict) and answer.get("type") == 16:
+                parsed = _parse_cymru_txt_record(str(answer.get("data", "")))
+                if parsed:
+                    return {"ok": True, "source": "CYMRU_DOH_TXT", "queried_name": query_name, **parsed}
+        return {"ok": False, "error": "No Cymru ASN TXT record returned"}
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def query_ip_rdap(ip_str: str, bootstrap_cache: dict[int, dict] | None = None) -> dict:
+    """Query authoritative RIR IP RDAP via IANA bootstrap with Team Cymru DoH ASN fallback."""
+    try:
+        ip_obj = ipaddress.ip_address(str(ip_str).strip())
+    except ValueError:
+        return {"ok": False, "ip": str(ip_str), "error": "Invalid IP address", "trusted_as_instructions": False}
+    if not _is_global_public_ip(ip_obj):
+        return {"ok": False, "ip": str(ip_obj), "error": "Non-public IP excluded from IP RDAP", "trusted_as_instructions": False}
+    norm_ip = str(ip_obj)
+    errors: list[str] = []
+    summary: dict = {}
+    rdap_source = ""
+    rdap_ok = False
+    try:
+        cache = bootstrap_cache if bootstrap_cache is not None else {}
+        if ip_obj.version not in cache:
+            b_url = "https://data.iana.org/rdap/ipv4.json" if ip_obj.version == 4 else "https://data.iana.org/rdap/ipv6.json"
+            b_resp = fetch(b_url, max_bytes=2 * 1024 * 1024)
+            if b_resp.status != 200:
+                raise ValueError(f"IANA IPv{ip_obj.version} bootstrap HTTP {b_resp.status}")
+            cache[ip_obj.version] = json.loads(b_resp.body)
+        service = _find_ip_rdap_service(cache[ip_obj.version], ip_obj)
+        resp = fetch(service.rstrip("/") + "/ip/" + quote(norm_ip, safe=""))
+        if resp.status != 200:
+            raise ValueError(f"IP RDAP HTTP {resp.status}")
+        document = json.loads(resp.body)
+        if not isinstance(document, dict) or document.get("errorCode"):
+            raise ValueError("Invalid IP RDAP response document")
+        summary = parse_rdap_ip_json(document, queried_ip=norm_ip)
+        rdap_source = resp.url
+        rdap_ok = bool(summary)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        errors.append(str(exc))
+
+    asn_source = "RIR_RDAP" if summary.get("asns") else ""
+    if not summary.get("asns"):
+        cymru = query_ip_asn_doh(norm_ip)
+        if cymru.get("ok"):
+            asn_source = "CYMRU_DOH_TXT"
+            if not summary:
+                summary = {"ip": norm_ip, "handle": "", "network_name": "", "country": cymru.get("country", ""),
+                           "holder": "", "cidrs": [cymru["cidr"]] if cymru.get("cidr") else [],
+                           "asns": cymru["asns"], "abuse_emails": []}
+            else:
+                summary["asns"] = cymru["asns"]
+                if not summary.get("cidrs") and cymru.get("cidr"):
+                    summary["cidrs"] = [cymru["cidr"]]
+                if not summary.get("country") and cymru.get("country"):
+                    summary["country"] = cymru["country"]
+        elif cymru.get("error"):
+            errors.append(cymru["error"])
+    return {
+        "ok": bool(rdap_ok or summary.get("asns")),
+        "rdap_ok": rdap_ok,
+        "ip": norm_ip,
+        "source": rdap_source or ("CYMRU_DOH_TXT" if summary.get("asns") else ""),
+        "asn_source": asn_source,
+        "summary": summary,
+        "errors": errors,
+        "use": "HOSTING_HINT_NOT_PROOF_OF_ATTRIBUTION",
+        "trusted_as_instructions": False,
+    }
+
+
+def query_ip_intel(ips: list[str], limit: int = 2) -> list[dict]:
+    """Query bounded RIR IP RDAP + ASN attribution leads for distinct global public IPs."""
+    if limit < 1:
+        return []
+    unique_public: list[str] = []
+    seen: set[str] = set()
+    for raw in ips:
+        try:
+            ip_obj = ipaddress.ip_address(str(raw).strip())
+        except ValueError:
+            continue
+        norm = str(ip_obj)
+        if _is_global_public_ip(ip_obj) and norm not in seen:
+            seen.add(norm)
+            unique_public.append(norm)
+    bootstrap_cache: dict[int, dict] = {}
+    return [query_ip_rdap(ip, bootstrap_cache=bootstrap_cache) for ip in unique_public[:limit]]
 
 
 def _entries(directory: Path) -> list[dict]:
@@ -170,6 +530,8 @@ def run_recon(target_url: str, case_dir: Path, allowlist_domains=None, proxy=Non
         report["capture_status"] = "CAPTURED" if 200 <= response.status < 300 and response.body else "PARTIAL"
     except (ValueError, OSError) as exc:
         report["error"] = str(exc)
+    ip_candidates = [*( [report["peer_ip"]] if report.get("peer_ip") else [] ), *(dns.get("A") or []), *(dns.get("AAAA") or [])]
+    report["ip_intel"] = query_ip_intel(ip_candidates, limit=2) if ip_candidates else []
     report["finished_at_utc"] = utc_now()
     atomic_write_json(directory / "recon-report.json", report)
     manifest = build_evidence_manifest(directory, url, dns.get("A", []) + dns.get("AAAA", []), False)

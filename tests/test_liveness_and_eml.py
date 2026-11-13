@@ -27,6 +27,29 @@ class TestLiveness(Fixture):
 
     def test_clienthold_not_automatic_case_close(self):
         self.assertEqual(self.classify(statuses=["clientHold"])["verdict"], "DOWN_CANDIDATE_REVIEW")
+        self.assertEqual(self.classify(statuses=["client Hold"])["verdict"], "DOWN_CANDIDATE_REVIEW")
+
+    def test_probe_case_with_check_rdap_caches_and_surfaces_hold(self):
+        cm.create_case(self.brand, "https://suspect.example/second", ["COPYRIGHT_CLONE"])
+        with patch.object(lv, "query_direct_dns", return_value={"A": ["93.184.216.34"], "dns_query_ok": True}), \
+             patch.object(lv, "query_rdap", return_value={"ok": True, "queried_domain": "suspect.example",
+                                                          "summary": {"status_codes": ["clienthold"]}}) as qrdap, \
+             patch.object(lv, "fetch", return_value=FetchResult("https://suspect.example/product", 200, {}, b"examplebrand", "93.184.216.34", ())):
+            result = lv.probe_case(self.case, ["examplebrand"], check_rdap=True)
+        qrdap.assert_called_once_with("suspect.example")
+        self.assertEqual(result["case_status_after_probe"], "DISCOVERED")
+        self.assertEqual(result["verdict"], "REVIEW_REQUIRED")
+        for target in result["targets"]:
+            self.assertEqual(target["verdict"], "DOWN_CANDIDATE_REVIEW")
+            self.assertEqual(target["rdap_statuses"], ["clienthold"])
+
+    def test_probe_case_with_check_rdap_surfaces_rdap_error_without_blocking(self):
+        with patch.object(lv, "query_direct_dns", return_value={"A": ["93.184.216.34"], "dns_query_ok": True}), \
+             patch.object(lv, "query_rdap", return_value={"ok": False, "error": "RDAP unavailable"}), \
+             patch.object(lv, "fetch", return_value=FetchResult("https://suspect.example/product", 200, {}, b"examplebrand", "93.184.216.34", ())):
+            result = lv.probe_case(self.case, ["examplebrand"], check_rdap=True)
+        self.assertEqual(result["targets"][0]["verdict"], "CONTENT_PRESENT")
+        self.assertEqual(result["targets"][0]["rdap_error"], "RDAP unavailable")
 
     def test_keywords_in_attributes_not_visible(self):
         self.assertEqual(self.classify(html='<div data-tag="examplebrand">Other</div>')["verdict"], "CONTENT_CHANGED_REVIEW")

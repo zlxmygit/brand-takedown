@@ -67,7 +67,7 @@ python3 scripts/recon_target.py run --slug example-brand --case-dir "$CASE_DIR" 
 python3 scripts/recon_target.py refresh-manifest --slug example-brand --case-dir "$CASE_DIR"
 ```
 
-`.example` 是文档占位域名，不提供真实取证成功样例。网络失败会返回非零退出码并保存失败记录，
+`.example` 是文档占位域名，不提供真实取证成功样例。`recon_target.py run` 会自动通过 IANA bootstrap 执行域名（含子域名回退注册主域）与有限公网 IP（最多 2 个）RDAP 结构化摘要提取，并在缺失 ASN 时通过 Google DoH 查询 Team Cymru TXT 补充 ASN 线索（仅作托管参考，不作归属定论）。网络失败会返回非零退出码并保存失败记录，
 不会把空页面变成有效取证。截图请通过 `add-evidence --source <file>` 追加为新快照，不要修改旧快照。
 `refresh-manifest` 改为验证命令，发现修改就报错，不能用来接受新哈希。
 
@@ -115,7 +115,7 @@ python3 scripts/case_manager.py submit --slug example-brand --case-dir "$CASE_DI
 
 ### 4. 巡检、补件和反通知
 
-`check_liveness.py patrol --slug <slug>` 逐案隔离错误。`case_manager.py due --slug <slug>` 同时输出
+`check_liveness.py patrol --slug <slug>` 逐案隔离错误，可附加 `--check-rdap` 同步检查注册局 `clienthold`/`serverhold` 冻结线索（仍需人工复核，不自动结案）。`case_manager.py due --slug <slug>` 同时输出
 跟进、补件、Tier-3 复核和法律待办。`escalate` 只计划草稿，不虚构已发送的升级事件。
 `counter-notice` 要求 `--source-ref`；`--provider-received-at` 和 `--provider-timezone` 已知时才做
 10–14 工作日的**非法律截止估算**。未知起算日就立刻请求律师核对，不伪造具体期限。
