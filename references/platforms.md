@@ -17,6 +17,8 @@ python3 scripts/doctor.py
 Windows PowerShell：
 
 ```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 py -3 --version
 py -3 -m pip install --require-hashes -r requirements.txt
 py -3 scripts/doctor.py
@@ -53,6 +55,8 @@ py -3 scripts/recon_target.py refresh-manifest --slug example-brand --case-dir $
 py -3 scripts/case_manager.py summary --slug example-brand
 ```
 
+Windows PowerShell 5.1 和 PowerShell 7 均可使用。每次新开终端先执行安装示例中的两行 UTF-8 设置，保证中文 JSON 管道的编码一致。
+
 PowerShell 用 `$env:NAME = 'value'` 设置环境变量，用反引号换行。README 中的 bash 示例使用 `export NAME=value` 和反斜杠换行；Windows 执行时应改用对应语法，或把命令写成一行。
 
 投诉材料、补件、反通知、下线复核和雷达归档的参数在三种系统上一致。参见 [案件跟进流程](followup-workflows.md)。Agent 应使用检测到的 Python 解释器，以参数数组调用脚本，不应在 Windows 上拼接 bash 命令。
@@ -78,7 +82,7 @@ python -m unittest discover -s tests -v
 python scripts/check_distribution.py --package
 ```
 
-CI 在 Ubuntu 24.04、macOS 15 和 Windows Server 2022 上，分别使用 Python 3.11、3.13 测试源码和解压后的安装包。Windows 专用的目录联接、只读文件和大小写路径测试，只在 Windows 上执行。
+CI 在 Ubuntu 24.04、macOS 15 和 Windows Server 2022 上，分别使用 Python 3.11、3.13 测试源码和解压后的安装包。CI 还会分别运行 Windows PowerShell 5.1、PowerShell 7 的中文建档示例。Windows 专用的目录联接、只读文件和大小写路径测试，只在 Windows 上执行。
 
 ## 实现依据
 

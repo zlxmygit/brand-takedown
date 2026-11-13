@@ -35,20 +35,16 @@ class Fixture(unittest.TestCase):
     def assertPrivatePath(self, path, directory=False):
         import os
         if os.name == "nt":
-            import re
-            from windows_security import current_user_sid, read_dacl
+            from windows_security import current_user_sid, read_dacl, read_allowed_entries
             dacl = read_dacl(path)
             self.assertTrue(dacl.startswith("D:P"), dacl)
-            aces = re.findall(r"\(([^)]+)\)", dacl)
-            self.assertEqual(len(aces), 3, dacl)
-            self.assertEqual({a.split(";")[-1] for a in aces}, {current_user_sid(), "SY", "BA"})
-            for ace in aces:
-                fields = ace.split(";")
-                self.assertEqual(fields[0], "A")
-                self.assertEqual(fields[2], "FA")
-                self.assertNotIn("ID", fields[1])
-                if directory:
-                    self.assertIn("OI", fields[1]); self.assertIn("CI", fields[1])
+            entries = read_allowed_entries(path)
+            self.assertEqual(len(entries), 3, dacl)
+            self.assertEqual({e["sid"] for e in entries}, {current_user_sid(), "S-1-5-18", "S-1-5-32-544"})
+            for entry in entries:
+                self.assertEqual(entry["mask"], 0x1F01FF)
+                self.assertFalse(entry["flags"] & 0x10)  # INHERITED_ACE
+                self.assertEqual(entry["flags"], 0x03 if directory else 0)
         else:
             self.assertEqual(path.stat().st_mode & 0o777, 0o700 if directory else 0o600)
 

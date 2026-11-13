@@ -42,6 +42,8 @@ python3 scripts/doctor.py
 Windows PowerShell：
 
 ```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 git clone https://github.com/zlxmygit/brand-takedown.git
 cd brand-takedown
 py -3 -m pip install --require-hashes -r requirements.txt

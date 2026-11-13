@@ -73,6 +73,7 @@ FILES = (
     'templates/notices-registrar-hosting-cdn.md',
     'templates/notices-saas-payment-phishing.md',
     'templates/profile.schema.json',
+    'tests/powershell_smoke.ps1',
     'tests/common.py',
     'tests/test_audit_regressions.py',
     'tests/test_brand_registry.py',

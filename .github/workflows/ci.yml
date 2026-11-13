@@ -42,17 +42,11 @@ jobs:
         run: python scripts/check_distribution.py --tracked
       - name: Test installed package and reproducibility
         run: python scripts/check_distribution.py --package
-      - name: PowerShell quick start
+      - name: PowerShell 7 quick start
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $env:BRAND_TAKEDOWN_REGISTRY = Join-Path $env:RUNNER_TEMP '跨平台 入门/registry.json'
-          $profile = Join-Path $env:RUNNER_TEMP '跨平台 入门/input.json'
-          New-Item -ItemType Directory -Force (Split-Path $profile) | Out-Null
-          Copy-Item examples/sample-profile.json $profile
-          python scripts/brand_registry.py init --slug example-brand --data-dir (Join-Path (Split-Path $profile) 'brand') --profile-file $profile
-          if ($LASTEXITCODE -ne 0) { throw 'Brand registration failed' }
-          python scripts/case_manager.py create --slug example-brand --url 'https://suspect.example/product' --types COPYRIGHT_CLONE
-          if ($LASTEXITCODE -ne 0) { throw 'Case creation failed' }
-          python scripts/case_manager.py summary --slug example-brand
-          if ($LASTEXITCODE -ne 0) { throw 'Case summary failed' }
+        run: ./tests/powershell_smoke.ps1
+      - name: Windows PowerShell 5.1 quick start
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/powershell_smoke.ps1

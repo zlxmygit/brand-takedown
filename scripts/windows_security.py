@@ -25,6 +25,7 @@ def _api():
         (adv.ConvertSidToStringSidW, [pointer, ctypes.POINTER(pointer)], w.BOOL),
         (adv.ConvertStringSecurityDescriptorToSecurityDescriptorW,
          [w.LPCWSTR, w.DWORD, ctypes.POINTER(pointer), ctypes.POINTER(w.DWORD)], w.BOOL),
+        (adv.GetAce, [pointer, w.DWORD, ctypes.POINTER(pointer)], w.BOOL),
         (adv.GetSecurityDescriptorDacl,
          [pointer, ctypes.POINTER(w.BOOL), ctypes.POINTER(pointer), ctypes.POINTER(w.BOOL)], w.BOOL),
         (adv.SetNamedSecurityInfoW,
@@ -107,5 +108,44 @@ def read_dacl(path: Path) -> str:
             return ctypes.wstring_at(text)
         finally:
             kernel.LocalFree(text)
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def read_allowed_entries(path: Path) -> list[dict]:
+    """Read actual ACE masks and numeric SIDs, independent of SDDL aliases."""
+    class ACL(ctypes.Structure):
+        _fields_ = [("revision", w.BYTE), ("reserved", w.BYTE), ("size", w.WORD),
+                    ("count", w.WORD), ("reserved2", w.WORD)]
+
+    class ACE(ctypes.Structure):
+        _fields_ = [("type", w.BYTE), ("flags", w.BYTE), ("size", w.WORD),
+                    ("mask", w.DWORD), ("sid_start", w.DWORD)]
+
+    adv, kernel = _api()
+    descriptor, dacl = ctypes.c_void_p(), ctypes.c_void_p()
+    result = adv.GetNamedSecurityInfoW(str(path), 1, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+    if result:
+        raise ctypes.WinError(result)
+    try:
+        if not dacl.value:
+            raise ValueError("Expected an explicit DACL")
+        count = ctypes.cast(dacl, ctypes.POINTER(ACL)).contents.count
+        entries = []
+        for index in range(count):
+            pointer = ctypes.c_void_p()
+            if not adv.GetAce(dacl, index, ctypes.byref(pointer)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ace = ctypes.cast(pointer, ctypes.POINTER(ACE)).contents
+            if ace.type != 0 or ace.size < ctypes.sizeof(ACE):
+                raise ValueError("Expected access-allowed ACE")
+            text = ctypes.c_void_p()
+            if not adv.ConvertSidToStringSidW(ctypes.c_void_p(pointer.value + ACE.sid_start.offset), ctypes.byref(text)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                entries.append({"sid": ctypes.wstring_at(text), "mask": ace.mask, "flags": ace.flags})
+            finally:
+                kernel.LocalFree(text)
+        return entries
     finally:
         kernel.LocalFree(descriptor)
