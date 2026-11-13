@@ -14,8 +14,8 @@ class TestCLI(Fixture):
         env = dict(os.environ, BRAND_TAKEDOWN_REGISTRY=str(self.registry), PYTHONDONTWRITEBYTECODE="1")
         if extra_env:
             env.update(extra_env)
-        result = subprocess.run([sys.executable, "-S", str(ROOT / "scripts" / script), *map(str, args)],
-            capture_output=True, text=True, timeout=15, env=env, cwd=str(self.root))
+        result = subprocess.run([sys.executable, str(ROOT / "scripts" / script), *map(str, args)],
+            capture_output=True, text=True, timeout=15, env=env, cwd=str(self.root), encoding="utf-8")
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return json.loads(result.stdout if expected == 0 or result.stdout else result.stderr)
 
@@ -28,7 +28,7 @@ class TestCLI(Fixture):
     def test_all_public_clis_have_help(self):
         for name in ("brand_registry", "case_manager", "recon_target", "check_liveness", "ct_radar", "packets", "build_eml", "package_skill"):
             with self.subTest(name=name):
-                result = subprocess.run([sys.executable, "-S", str(ROOT / "scripts" / (name + ".py")), "--help"], capture_output=True, timeout=10)
+                result = subprocess.run([sys.executable, str(ROOT / "scripts" / (name + ".py")), "--help"], capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_cli_profile_validation(self):
@@ -36,9 +36,9 @@ class TestCLI(Fixture):
         self.assertTrue(result["valid"])
 
     def test_cli_registration_and_list(self):
-        sample = json.loads((ROOT / "examples/sample-profile.json").read_text())
+        sample = json.loads((ROOT / "examples/sample-profile.json").read_text(encoding="utf-8"))
         sample["brand_slug"] = "second-brand"
-        path = self.root / "input.json"; path.write_text(json.dumps(sample))
+        path = self.root / "input.json"; path.write_text(json.dumps(sample), encoding="utf-8")
         self.cli("brand_registry.py", "init", "--slug", "second-brand", "--data-dir", self.root / "second", "--profile-file", path)
         result = self.cli("brand_registry.py", "list")
         self.assertIn("second-brand", result["brands"])
@@ -56,12 +56,12 @@ class TestCLI(Fixture):
 
     def test_cli_legacy_state_requires_review(self):
         legacy = self.brand / "cases" / "CASE-legacy"; legacy.mkdir()
-        (legacy / "case.json").write_text('{"primary_domain":"suspect.example"}')
+        (legacy / "case.json").write_text('{"primary_domain":"suspect.example"}', encoding="utf-8")
         result = self.cli("case_manager.py", "due", "--slug", "example-brand", expected=1)
         self.assertTrue(any(item["kind"] == "CASE_ERROR" for item in result["items"]))
 
     def test_cli_cross_brand_case_rejected(self):
-        sample = json.loads((ROOT / "examples/sample-profile.json").read_text()); sample["brand_slug"] = "second-brand"
+        sample = json.loads((ROOT / "examples/sample-profile.json").read_text(encoding="utf-8")); sample["brand_slug"] = "second-brand"
         br.register_brand("second-brand", self.root / "second", sample, self.registry)
         result = self.cli("case_manager.py", "add-channel", "--slug", "second-brand", "--case-dir", self.case,
             "--channel-id", "host", "--channel-class", "ENFORCEMENT_SLA", "--category", "hosting", "--provider", "Synthetic", "--endpoint", "abuse@provider.example", expected=2)
@@ -79,7 +79,7 @@ class TestCLI(Fixture):
 
     def test_cli_end_to_end_reviewed_draft_and_receipt(self):
         source = self.root / "comparison.txt"
-        source.write_text("Synthetic local comparison, not a real allegation.")
+        source.write_text("Synthetic local comparison, not a real allegation.", encoding="utf-8")
         capture = self.cli("recon_target.py", "add-evidence", "--slug", "example-brand", "--case-dir", self.case,
             "--url", "https://suspect.example/product", "--source", source)
         verified = self.cli("recon_target.py", "refresh-manifest", "--slug", "example-brand", "--case-dir", self.case)
@@ -88,7 +88,7 @@ class TestCLI(Fixture):
             "--channel-id", "host", "--channel-class", "ENFORCEMENT_SLA", "--category", "hosting", "--provider", "Synthetic Hosting", "--endpoint", "abuse@provider.example")
         req = self.request(capture["capture_id"])
         req["claims"][0]["evidence"][0]["filename"] = "comparison.txt"
-        request_file = self.root / "request.json"; request_file.write_text(json.dumps(req))
+        request_file = self.root / "request.json"; request_file.write_text(json.dumps(req), encoding="utf-8")
         draft = self.cli("packets.py", "--slug", "example-brand", "--case-dir", self.case, "prepare", "--request-file", request_file)
         packet_id = draft["packet_id"]
         self.cli("build_eml.py", "--slug", "example-brand", "--case-dir", self.case, "--packet-id", packet_id, expected=2)

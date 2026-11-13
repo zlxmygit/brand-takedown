@@ -10,8 +10,12 @@ description: >-
 
 # Brand Takedown — reviewed evidence and notice workflow
 
-Resolve `<SKILL_DIR>` to this file's directory. Require Python 3.11+ on Linux/macOS,
-a private local filesystem, and `python3 <SKILL_DIR>/scripts/doctor.py` success.
+Resolve `<SKILL_DIR>` to this file's directory. Support macOS, Windows and Linux
+with Python 3.11+ and a private local filesystem. Select the actual interpreter
+(`python3` on POSIX; `py -3` or the installed Python executable on Windows).
+On Windows install `requirements.txt` for IANA timezone data, then run `doctor.py`.
+Adapt shell examples to PowerShell on Windows; use argument arrays, not bash wrappers.
+Read [platforms.md](./references/platforms.md) for setup and native command examples.
 Read [host-contract.md](./references/host-contract.md) before using external tools.
 
 ## Non-negotiable boundaries

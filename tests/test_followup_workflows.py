@@ -167,7 +167,7 @@ class TestLegalPause(WorkflowFixture):
         self.assertEqual(state['channels'][0]['next_action_due_at'], '')
         self.assertEqual(state['channels'][0]['escalation_tier'], 1)
         self.assertEqual(state['counter_notices'][0]['responses'][0]['submission_ref'], 'legal-response-receipt')
-        body = (Path(draft['packet_dir'])/'notice.txt').read_text()
+        body = (Path(draft['packet_dir'])/'notice.txt').read_text(encoding="utf-8")
         self.assertIn('Reviewed response text.', body)
         self.assertNotIn('under penalty of perjury', body)
 
@@ -241,10 +241,10 @@ class TestLivenessReview(WorkflowFixture):
 
     def test_cli_down_review(self):
         cap = self.capture(); refs = self.root/'refs.json'
-        refs.write_text(json.dumps({'evidence':[{'capture_id':cap['capture_id'],'filename':'raw.bin'}]}))
-        proc = subprocess.run([sys.executable, '-S', str(ROOT/'scripts/case_manager.py'), '--registry', str(self.registry),
+        refs.write_text(json.dumps({'evidence':[{'capture_id':cap['capture_id'],'filename':'raw.bin'}]}), encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(ROOT/'scripts/case_manager.py'), '--registry', str(self.registry),
                                'review-liveness', '--slug', 'example-brand', '--case-dir', str(self.case), '--decision', 'DOWN',
-                               '--reviewer', 'Reviewer', '--source-ref', 'source', '--summary', 'reviewed', '--evidence-file', str(refs)], capture_output=True, text=True, timeout=15)
+                               '--reviewer', 'Reviewer', '--source-ref', 'source', '--summary', 'reviewed', '--evidence-file', str(refs)], capture_output=True, text=True, timeout=15, encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(proc.stdout)['liveness_state'], 'REVIEWED_DOWN')
 
@@ -281,7 +281,7 @@ class TestRadarArchive(Fixture):
         exported = archive.export_batch(self.brand, result['batch_id'])
         self.assertEqual(exported['sha256'], result['sha256'])
         self.assertEqual(exported['entries']['examplebrand-old0.example'], original['candidates']['examplebrand-old0.example'])
-        self.assertEqual((self.brand/'radar-archive.sqlite3').stat().st_mode & 0o777, 0o600)
+        self.assertPrivatePath(self.brand/'radar-archive.sqlite3')
 
     def test_interrupted_prune_recovers_on_next_scan(self):
         original = self.seed()
@@ -447,7 +447,7 @@ class TestContinuousSequences(WorkflowFixture):
         cm.add_linked_cloak_domain(self.case, 'pay.other.example')
         cap = self.capture(); refs = [{'capture_id': cap['capture_id'], 'filename':'raw.bin'}]
         with self.assertRaises(ValueError): cm.review_liveness(self.case,'DOWN','Reviewer','source',refs,'Reviewed')
-        file = self.root/'review.txt'; file.write_text('Reviewed primary URL and linked payment page.')
+        file = self.root/'review.txt'; file.write_text('Reviewed primary URL and linked payment page.', encoding="utf-8")
         cap = recon.add_evidence(self.case, 'https://suspect.example/product', file)
         refs = [{'capture_id':cap['capture_id'],'filename':'review.txt','observed_urls':['https://pay.other.example/']}]
         state = cm.review_liveness(self.case,'DOWN','Reviewer','source',refs,'Reviewed')
@@ -467,10 +467,10 @@ class TestContinuousSequences(WorkflowFixture):
         import os
         self.start(); cm.update_channel_fields(self.case, 'host', 'NEED_MORE_INFO', ticket_ref='CLI-TICKET')
         cap = self.capture(); req = self.request(cap['capture_id']); req['submission_kind'] = 'SUPPLEMENT'
-        source = self.root/'request.json'; source.write_text(json.dumps(req))
+        source = self.root/'request.json'; source.write_text(json.dumps(req), encoding="utf-8")
         env = dict(os.environ, BRAND_TAKEDOWN_REGISTRY=str(self.registry))
         def cli(script, *args):
-            result = subprocess.run([sys.executable,'-S',str(ROOT/'scripts'/script),*map(str,args)],env=env,capture_output=True,text=True,timeout=15)
+            result = subprocess.run([sys.executable,str(ROOT/'scripts'/script),*map(str,args)],env=env,capture_output=True,text=True,timeout=15, encoding="utf-8")
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             return json.loads(result.stdout)
         common = ['--slug','example-brand','--case-dir',self.case]
@@ -485,10 +485,10 @@ class TestContinuousSequences(WorkflowFixture):
         data={'schema_version':2,'candidates':{'examplebrand-old.example':{'status':'REJECTED','first_seen_at':br.utc_now(),'reviewer':'Reviewer','rationale':'Unrelated'}}}
         atomic_write_json(self.brand/'radar_seen.json',data)
         env = dict(os.environ,BRAND_TAKEDOWN_REGISTRY=str(self.registry))
-        cmd=[sys.executable,'-S',str(ROOT/'scripts/ct_radar.py'),'--slug','example-brand']
-        first=subprocess.run(cmd+['--archive-reviewed','--reviewer','Reviewer'],env=env,capture_output=True,text=True,timeout=15)
+        cmd=[sys.executable,str(ROOT/'scripts/ct_radar.py'),'--slug','example-brand']
+        first=subprocess.run(cmd+['--archive-reviewed','--reviewer','Reviewer'],env=env,capture_output=True,text=True,timeout=15, encoding="utf-8")
         self.assertEqual(first.returncode,0,first.stderr)
         result=json.loads(first.stdout)
-        second=subprocess.run(cmd+['--export-batch',result['batch_id']],env=env,capture_output=True,text=True,timeout=15)
+        second=subprocess.run(cmd+['--export-batch',result['batch_id']],env=env,capture_output=True,text=True,timeout=15, encoding="utf-8")
         self.assertEqual(second.returncode,0,second.stderr)
         self.assertEqual(json.loads(second.stdout)['count'],1)

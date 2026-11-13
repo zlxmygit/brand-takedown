@@ -48,14 +48,14 @@ class TestBrandRegistry(Fixture):
         self.assertEqual(br.load_brand_profile("example-brand", self.registry)[1]["brand_slug"], "example-brand")
 
     def test_corrupt_registry_preserved(self):
-        self.registry.write_text('{"brands":')
+        self.registry.write_text('{"brands":', encoding="utf-8")
         before = self.registry.read_bytes()
         with self.assertRaises(ValueError):
             br.register_brand("example-brand", self.brand, self.profile, self.registry)
         self.assertEqual(self.registry.read_bytes(), before)
 
     def test_profile_slug_tampering_rejected(self):
-        path = self.brand / "profile.json"; p = json.loads(path.read_text()); p["brand_slug"] = "another"; path.write_text(json.dumps(p))
+        path = self.brand / "profile.json"; p = json.loads(path.read_text(encoding="utf-8")); p["brand_slug"] = "another"; path.write_text(json.dumps(p), encoding="utf-8")
         with self.assertRaises(ConflictError):
             br.load_brand_profile("example-brand", self.registry)
 
@@ -83,8 +83,8 @@ class TestBrandRegistry(Fixture):
         self.assertTrue(br.validate_profile(p))
 
     def test_private_permissions(self):
-        self.assertEqual((self.brand / "profile.json").stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.brand.stat().st_mode & 0o777, 0o700)
+        self.assertPrivatePath(self.brand / "profile.json")
+        self.assertPrivatePath(self.brand, directory=True)
 
     def test_public_filing_agent_validation(self):
         p = copy.deepcopy(self.profile)

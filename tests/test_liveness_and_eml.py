@@ -80,7 +80,7 @@ class TestLiveness(Fixture):
 
     def test_corrupt_case_does_not_block_rest_of_patrol(self):
         second, _ = cm.create_case(self.brand, "https://other.example/", ["COPYRIGHT_CLONE"])
-        (second / "case.json").write_text("{")
+        (second / "case.json").write_text("{", encoding="utf-8")
         with patch.object(lv, "query_direct_dns", return_value={"A": [], "dns_query_ok": False}), patch.object(lv, "fetch", side_effect=OSError("offline")):
             result = lv.patrol(self.brand, ["examplebrand"])
         self.assertEqual(result["probed_count"], 1); self.assertEqual(len(result["errors"]), 1)

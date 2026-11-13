@@ -10,7 +10,7 @@ body:
     id: environment
     attributes:
       label: OS, Python version and commit
-      placeholder: "Linux / Python 3.11 / commit SHA"
+      placeholder: "macOS / Windows / Linux, Python version, commit SHA"
     validations:
       required: true
   - type: textarea

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 import uuid
-from zoneinfo import ZoneInfo
+from runtime_support import load_timezone
 
 from brand_registry import (DEFAULT_REGISTRY_PATH, check_target, load_brand_profile,
                             normalize_hostname, profile_from_dir, utc_now)
@@ -383,7 +383,7 @@ def record_counter_notice(case_dir: Path, channel_id: str, received_at_iso: str,
         raise ValueError("Counter-notice summary and source message reference required")
     estimates = {}
     if provider_received_at:
-        local = _parse_iso_utc(provider_received_at).astimezone(ZoneInfo(provider_timezone))
+        local = _parse_iso_utc(provider_received_at).astimezone(load_timezone(provider_timezone))
         estimates = {"earliest_restore_estimate": _format_iso_utc(_add_business_days(local, 10)),
                      "latest_restore_estimate": _format_iso_utc(_add_business_days(local, 14))}
     def record(data):
@@ -543,6 +543,8 @@ def _main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    from runtime_support import configure_cli
+    configure_cli()
     try:
         sys.exit(_main())
     except (ValueError, OSError, KeyError) as exc:

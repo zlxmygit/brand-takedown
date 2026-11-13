@@ -24,11 +24,14 @@ brand-takedown 是一个品牌维权 Skill，用于采集网站证据、生成�
 ## 安装与接入
 
 ### 运行环境
-- 一台 **Mac 或 Linux** 电脑，安装 **Python 3.11 或更高版本**。
-- 无需额外安装第三方依赖包；品牌和案件数据请保存在电脑**本地硬盘**（不要放在共享网盘或同步盘目录中，避免多人/多端写文件冲突）。
+
+支持 **macOS、Windows 和 Linux**，要求 Python 3.11 或更高版本。Windows 原生运行，无需 WSL。品牌和案件数据保存在本机硬盘。
 
 ### 下载与环境检查
-在终端运行以下命令克隆仓库并检查本机是否就绪：
+
+克隆仓库，或从 [GitHub Releases](https://github.com/zlxmygit/brand-takedown/releases) 下载安装包并解压。
+
+macOS 和 Linux：
 
 ```bash
 git clone https://github.com/zlxmygit/brand-takedown.git
@@ -36,7 +39,18 @@ cd brand-takedown
 python3 scripts/doctor.py
 ```
 
-只要返回结果中出现 `"ok": true`，说明本机环境已经准备好了（也可以去 [GitHub Releases](https://github.com/zlxmygit/brand-takedown/releases) 下载源码压缩包解压使用）。
+Windows PowerShell：
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+git clone https://github.com/zlxmygit/brand-takedown.git
+cd brand-takedown
+py -3 -m pip install --require-hashes -r requirements.txt
+py -3 scripts/doctor.py
+```
+
+Windows 会安装时区数据包 `tzdata`。检查返回 `"ok": true` 后即可使用。完整步骤、中文路径和 PowerShell 建案命令见 [跨平台使用说明](references/platforms.md)。下文展开的命令使用 bash/zsh 语法，Windows 按该说明替换解释器、环境变量与换行符。
 
 ### Agent 和邮箱接入
 - **挂载 Skill**：把整个 `brand-takedown/` 文件夹放进你使用的 AI 助手 Skill 目录（例如 Antigravity、Claude Code、Codex 等，保持内部文件结构完整）。平时不用自己敲复杂命令行，直接跟 AI 对话让它调用脚本即可。
@@ -85,7 +99,7 @@ python3 scripts/brand_registry.py check-allowlist --slug example-brand --url "ht
 拿到可疑商品链接或山寨站网址后，先为它建档立卷，再抓取网页页面、注册商和服务器托管商线索；如果你另外存了高清对比截图，也可以一起导入并做一次图片相似度初筛。
 
 - **每次留证独立存档**：后续补交新截图会自动新增一个快照，**不会覆盖历史记录**，确保时间线清晰。
-- **盗图初筛边界**：比对打分（`dHash` 汉明距离，默认阈值 10）用于筛选相似图片；透明像素统一合成到白底，是否真正构成抄袭仍需人眼复核（在 macOS 上可直接比对 PNG/BMP/JPG 等常见图片；在 Linux 上请先转为 PNG 或 BMP）。
+- **盗图初筛边界**：比对打分（`dHash` 汉明距离，默认阈值 10）用于筛选相似图片；透明像素统一合成到白底，是否真正构成抄袭仍需人眼复核（在 macOS 上可直接比对 PNG/BMP/JPG 等常见图片；在 Windows 和 Linux 上请先转为 PNG 或 BMP）。
 - **证据签名（可选）**：设置 `BRAND_TAKEDOWN_HMAC_KEY` 后，新证据使用 HMAC 签名。品牌档案中设置 `"require_evidence_hmac": true`，或设置环境变量 `BRAND_TAKEDOWN_REQUIRE_HMAC=1`，可在取证、审批、邮件导出和回执登记时持续要求签名。密钥通过运行环境提供，不写入仓库。
 
 > **你可以这样对 AI 说：**  
@@ -306,9 +320,7 @@ python3 -m compileall -q scripts tests
 python3 scripts/doctor.py
 python3 scripts/brand_registry.py validate --profile-file examples/sample-profile.json
 python3 -m unittest discover -s tests -v
-python3 scripts/package_skill.py --out /tmp/brand-takedown-a.zip
-python3 scripts/package_skill.py --out /tmp/brand-takedown-b.zip
-cmp /tmp/brand-takedown-a.zip /tmp/brand-takedown-b.zip
+python3 scripts/check_distribution.py --package
 ```
 
 > `package_skill.py` 仅按白名单打包公开源码和文档，并在生成的可复现 `.zip` 压缩包内部附加 `SHA256SUMS.txt` 清单，不会夹带任何私有运行数据。开发规范见 [贡献指南](CONTRIBUTING.md)、[安全政策](SECURITY.md)、[行为准则](CODE_OF_CONDUCT.md) 与 [开源许可](LICENSE)。

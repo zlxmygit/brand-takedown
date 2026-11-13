@@ -24,12 +24,29 @@ class Fixture(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.registry = self.root / "registry.json"
         self.brand = self.root / "brand"
-        self.profile = json.loads((ROOT / "examples/sample-profile.json").read_text())
+        self.profile = json.loads((ROOT / "examples/sample-profile.json").read_text(encoding="utf-8"))
         self.profile["copyright_originals"] = [{"asset_name": "Original photo", "official_source_url": "https://brand.example/product"}]
         self.profile["keyword_watch_patterns"] = ["examplebrand"]
         br.register_brand(self.profile["brand_slug"], self.brand, self.profile, self.registry)
         self.profile = br.profile_from_dir(self.brand)
         self.case, _ = cm.create_case(self.brand, "https://suspect.example/product", ["COPYRIGHT_CLONE"])
+
+
+    def assertPrivatePath(self, path, directory=False):
+        import os
+        if os.name == "nt":
+            from windows_security import current_user_sid, read_dacl, read_allowed_entries
+            dacl = read_dacl(path)
+            self.assertTrue(dacl.startswith("D:P"), dacl)
+            entries = read_allowed_entries(path)
+            self.assertEqual(len(entries), 3, dacl)
+            self.assertEqual({e["sid"] for e in entries}, {current_user_sid(), "S-1-5-18", "S-1-5-32-544"})
+            for entry in entries:
+                self.assertEqual(entry["mask"], 0x1F01FF)
+                self.assertFalse(entry["flags"] & 0x10)  # INHERITED_ACE
+                self.assertEqual(entry["flags"], 0x03 if directory else 0)
+        else:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700 if directory else 0o600)
 
     def capture(self, body=b"<h1>examplebrand copied image</h1>", url=None):
         url = url or "https://suspect.example/product"

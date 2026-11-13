@@ -45,7 +45,7 @@ class TestRecon(Fixture):
 
     def test_manifest_itself_is_bound_to_case(self):
         report = self.capture(); p = self.case / "evidence" / report["capture_id"] / "evidence-manifest.json"
-        p.write_text(p.read_text() + " ")
+        p.write_text(p.read_text(encoding="utf-8") + " ", encoding="utf-8")
         with self.assertRaises(ValueError): recon.verify_capture(self.case, report["capture_id"])
 
     def test_nested_evidence_included(self):
@@ -56,7 +56,7 @@ class TestRecon(Fixture):
 
     def test_external_symlink_rejected(self):
         directory = self.root / "capture"; directory.mkdir()
-        outside = self.root / "secret.txt"; outside.write_text("test")
+        outside = self.root / "secret.txt"; outside.write_text("test", encoding="utf-8")
         (directory / "linked.txt").symlink_to(outside)
         with self.assertRaises(ValueError): recon.build_evidence_manifest(directory, "https://suspect.example/", [], False)
 
@@ -107,7 +107,7 @@ class TestRecon(Fixture):
 
     def test_reserved_user_evidence_names_rejected(self):
         for name in ("evidence-manifest.json", ".evidence.lock", "recon-report.json", "headers.json"):
-            source = self.root / name; source.write_text("synthetic")
+            source = self.root / name; source.write_text("synthetic", encoding="utf-8")
             with self.subTest(name=name), self.assertRaises(ValueError):
                 recon.add_evidence(self.case, "https://suspect.example/product", source)
 
@@ -358,9 +358,9 @@ class TestRadar(Fixture):
             self.assertEqual(ct.run_radar_scan(self.brand, self.profile)["pending_count"], 0)
 
     def test_corrupt_seen_state_not_reset(self):
-        path = self.brand / "radar_seen.json"; path.write_text("{")
+        path = self.brand / "radar_seen.json"; path.write_text("{", encoding="utf-8")
         with patch.object(ct, "_fetch_crt_json", return_value=[]), self.assertRaises(ValueError): ct.run_radar_scan(self.brand, self.profile)
-        self.assertEqual(path.read_text(), "{")
+        self.assertEqual(path.read_text(encoding="utf-8"), "{")
 
     def test_wildcard_allowlist_dedup(self):
         result = ct.extract_candidate_domains_from_crt([{"name_value": "*.bad.example\nbad.example\nshop.brand.example"}], ["brand.example"], set())

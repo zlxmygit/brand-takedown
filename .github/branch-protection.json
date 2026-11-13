@@ -5,7 +5,9 @@
       "Verify (ubuntu-24.04, Python 3.11)",
       "Verify (ubuntu-24.04, Python 3.13)",
       "Verify (macos-15, Python 3.11)",
-      "Verify (macos-15, Python 3.13)"
+      "Verify (macos-15, Python 3.13)",
+      "Verify (windows-2022, Python 3.11)",
+      "Verify (windows-2022, Python 3.13)"
     ]
   },
   "enforce_admins": true,

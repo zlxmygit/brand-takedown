@@ -291,17 +291,17 @@ class TestWorkflowRepairs(Fixture):
     def cli(self, script, *args, expected=0, extra_env=None):
         env = dict(os.environ, BRAND_TAKEDOWN_REGISTRY=str(self.registry))
         env.update(extra_env or {})
-        result = subprocess.run([sys.executable, '-S', str(ROOT / 'scripts' / script), *map(str, args)], capture_output=True, text=True, timeout=15, env=env)
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), *map(str, args)], capture_output=True, text=True, timeout=15, env=env, encoding="utf-8")
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return json.loads(result.stdout or result.stderr)
 
     def test_external_agent_full_cli_workflow(self):
         self.agent(); self.channel()
-        source = self.root / 'comparison.txt'; source.write_text('Synthetic image comparison')
+        source = self.root / 'comparison.txt'; source.write_text('Synthetic image comparison', encoding="utf-8")
         capture = self.cli('recon_target.py', 'add-evidence', '--slug', 'example-brand', '--case-dir', self.case, '--url', 'https://suspect.example/product', '--source', source)
         request = self.request(capture['capture_id']); request['public_archive_expected'] = True
         request['claims'][0]['evidence'][0]['filename'] = source.name
-        req = self.root / 'request.json'; req.write_text(json.dumps(request))
+        req = self.root / 'request.json'; req.write_text(json.dumps(request), encoding="utf-8")
         draft = self.cli('packets.py', '--slug', 'example-brand', '--case-dir', self.case, 'prepare', '--request-file', req)
         self.cli('packets.py', '--slug', 'example-brand', '--case-dir', self.case, 'approve', '--packet-id', draft['packet_id'], '--reviewer', 'Reviewer', '--reviewed-digest', draft['packet_sha256'], '--confirm-human-review')
         out = self.cli('build_eml.py', '--slug', 'example-brand', '--case-dir', self.case, '--packet-id', draft['packet_id'])
@@ -312,7 +312,7 @@ class TestWorkflowRepairs(Fixture):
     def test_unconfigured_packet_sender_is_rejected(self):
         self.agent(); self.channel(); cap = self.capture(); req = self.request(cap['capture_id']); req['public_archive_expected'] = True
         draft = packets.prepare_packet(self.case, req)
-        path = Path(draft['packet_dir']) / 'packet.json'; data = json.loads(path.read_text()); data['from_addr'] = 'other@agent.example'; path.write_text(json.dumps(data))
+        path = Path(draft['packet_dir']) / 'packet.json'; data = json.loads(path.read_text(encoding="utf-8")); data['from_addr'] = 'other@agent.example'; path.write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, 'signer'):
             packets.approve_packet(self.case, draft['packet_id'], 'Reviewer', hashlib.sha256(path.read_bytes()).hexdigest(), True)
 
@@ -349,8 +349,8 @@ class TestWorkflowRepairs(Fixture):
             draft = packets.prepare_packet(self.case, req)
             packets.approve_packet(self.case, draft['packet_id'], 'Reviewer', draft['packet_sha256'], True)
             directory = self.case / 'evidence' / cap['capture_id']; path = directory / 'evidence-manifest.json'
-            manifest = json.loads(path.read_text()); manifest.pop('hmac_algorithm'); manifest.pop('hmac_sha256')
-            path.write_text(json.dumps(manifest))
+            manifest = json.loads(path.read_text(encoding="utf-8")); manifest.pop('hmac_algorithm'); manifest.pop('hmac_sha256')
+            path.write_text(json.dumps(manifest), encoding="utf-8")
             case = storage.read_json(self.case / 'case.json'); case['captures'][0]['manifest_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest(); storage.atomic_write_json(self.case / 'case.json', case)
             operations = [lambda: packets.prepare_packet(self.case, req),
                           lambda: packets.approve_packet(self.case, draft['packet_id'], 'Reviewer', draft['packet_sha256'], True),
@@ -363,10 +363,10 @@ class TestWorkflowRepairs(Fixture):
 
     def test_hmac_valid_full_cli_flow(self):
         env = {'BRAND_TAKEDOWN_REQUIRE_HMAC': '1', 'BRAND_TAKEDOWN_HMAC_KEY': 'cli-secret'}
-        source = self.root / 'comparison.txt'; source.write_text('Synthetic comparison'); self.channel()
+        source = self.root / 'comparison.txt'; source.write_text('Synthetic comparison', encoding="utf-8"); self.channel()
         cap = self.cli('recon_target.py', 'add-evidence', '--slug', 'example-brand', '--case-dir', self.case, '--url', 'https://suspect.example/product', '--source', source, extra_env=env)
         req = self.request(cap['capture_id']); req['claims'][0]['evidence'][0]['filename'] = source.name
-        path = self.root / 'request.json'; path.write_text(json.dumps(req))
+        path = self.root / 'request.json'; path.write_text(json.dumps(req), encoding="utf-8")
         d = self.cli('packets.py', '--slug', 'example-brand', '--case-dir', self.case, 'prepare', '--request-file', path, extra_env=env)
         self.cli('packets.py', '--slug', 'example-brand', '--case-dir', self.case, 'approve', '--packet-id', d['packet_id'], '--reviewer', 'Reviewer', '--reviewed-digest', d['packet_sha256'], '--confirm-human-review', extra_env=env)
         self.cli('build_eml.py', '--slug', 'example-brand', '--case-dir', self.case, '--packet-id', d['packet_id'], extra_env=env)
@@ -378,7 +378,7 @@ class TestWorkflowRepairs(Fixture):
             recon._hmac_policy()
 
     def right_request(self, route, kind, territory='US', right_type='design'):
-        certificate = self.root / 'certificate.txt'; certificate.write_text('Synthetic certificate')
+        certificate = self.root / 'certificate.txt'; certificate.write_text('Synthetic certificate', encoding="utf-8")
         p = copy.deepcopy(self.profile)
         p['target_markets'].append('CN_EXPORT')
         if kind == 'DESIGN':
